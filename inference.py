@@ -68,6 +68,7 @@ for name in complex_name_list:
     os.makedirs(write_dir, exist_ok=True)
 
 # preprocessing of complexes into geometric graphs
+print("Loading test data in InferenceDataset class")
 test_dataset = InferenceDataset(out_dir=args.out_dir, complex_names=complex_name_list, protein_files=protein_path_list,
                                 ligand_descriptions=ligand_description_list, protein_sequences=protein_sequence_list,
                                 lm_embeddings=score_model_args.esm_embeddings_path is not None,
@@ -75,6 +76,7 @@ test_dataset = InferenceDataset(out_dir=args.out_dir, complex_names=complex_name
                                 c_alpha_max_neighbors=score_model_args.c_alpha_max_neighbors,
                                 all_atoms=score_model_args.all_atoms, atom_radius=score_model_args.atom_radius,
                                 atom_max_neighbors=score_model_args.atom_max_neighbors)
+print("Creating DataLoader")
 test_loader = DataLoader(dataset=test_dataset, batch_size=1, shuffle=False)
 
 if args.confidence_model_dir is not None and not confidence_args.use_original_model_cache:
@@ -94,6 +96,7 @@ else:
 
 t_to_sigma = partial(t_to_sigma_compl, args=score_model_args)
 
+print("Loading Model")
 model = get_model(score_model_args, device, t_to_sigma=t_to_sigma, no_parallel=True)
 state_dict = torch.load(f'{args.model_dir}/{args.ckpt}', map_location=torch.device('cpu'))
 model.load_state_dict(state_dict, strict=True)
@@ -101,6 +104,7 @@ model = model.to(device)
 model.eval()
 
 if args.confidence_model_dir is not None:
+    print("Loading confidence Model")
     confidence_model = get_model(confidence_args, device, t_to_sigma=t_to_sigma, no_parallel=True, confidence_mode=True)
     state_dict = torch.load(f'{args.confidence_model_dir}/{args.confidence_ckpt}', map_location=torch.device('cpu'))
     confidence_model.load_state_dict(state_dict, strict=True)
@@ -168,11 +172,20 @@ for idx, orig_complex_graph in tqdm(enumerate(test_loader)):
 
         # save predictions
         write_dir = f'{args.out_dir}/{complex_name_list[idx]}'
+        prediction_metadata_csv = []
         for rank, pos in enumerate(ligand_pos):
             mol_pred = copy.deepcopy(lig)
             if score_model_args.remove_hs: mol_pred = RemoveHs(mol_pred)
-            if rank == 0: write_mol_with_coords(mol_pred, pos, os.path.join(write_dir, f'rank{rank+1}.sdf'))
-            write_mol_with_coords(mol_pred, pos, os.path.join(write_dir, f'rank{rank+1}_confidence{confidence[rank]:.2f}.sdf'))
+            sdf_fp = os.path.join(write_dir, f'rank{rank+1}.sdf')
+            write_mol_with_coords(mol_pred, pos, sdf_fp)
+            prediction_metadata_csv.append({
+                "rank": rank + 1,
+                "confidence": confidence[rank],
+                "sdf_path": sdf_fp
+            })
+
+        prediction_metadata_csv = pd.DataFrame(prediction_metadata_csv)
+        prediction_metadata_csv.to_csv(os.path.join(write_dir, "prediction_metadata.csv"))
 
         # save visualisation frames
         if args.save_visualisation:
