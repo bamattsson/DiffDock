@@ -7,7 +7,11 @@ import numpy as np
 import pandas as pd
 from rdkit import RDLogger
 from torch_geometric.loader import DataLoader
+<<<<<<< HEAD
 from rdkit.Chem import RemoveAllHs
+=======
+import traceback
+>>>>>>> b5fae56... Improving error logging and skip already analysed complexes
 
 from pathlib import Path
 
@@ -117,6 +121,26 @@ print(f"DiffDock will run on {device}")
 
 if args.protein_ligand_csv is not None:
     df = pd.read_csv(args.protein_ligand_csv)
+    def complex_already_calculated(complex_name):
+        complex_folder_path = out_dir.joinpath(complex_name)
+        if not complex_folder_path.exists():
+            return False
+        elif complex_folder_path.joinpath("error_log.txt").exists():
+            return True
+        elif (
+            complex_folder_path.joinpath("prediction_metadata.csv").exists()
+            and (
+                len(list(complex_folder_path.glob("*.sdf")))
+                >= args.samples_per_complex
+                )
+        ):
+            return True
+        return False
+    already_calculated_complexes = df["complex_name"].apply(complex_already_calculated)
+    print(
+        f"Skipping {already_calculated_complexes.sum()} already calculated complexes"
+        )
+    df = df.loc[~already_calculated_complexes, :]
     complex_name_list = set_nones(df['complex_name'].tolist())
     protein_path_list = set_nones(df['protein_path'].tolist())
     protein_sequence_list = set_nones(df['protein_sequence'].tolist())
@@ -185,10 +209,17 @@ tr_schedule = get_t_schedule(inference_steps=args.inference_steps, sigma_schedul
 failures, skipped = 0, 0
 N = args.samples_per_complex
 print('Size of test dataset: ', len(test_dataset))
-for idx, orig_complex_graph in tqdm(enumerate(test_loader)):
+for idx, orig_complex_graph in tqdm(
+    enumerate(test_loader), total=len(test_dataset)
+    ):
+    write_dir = out_dir.joinpath(complex_name_list[idx])
+    write_dir.mkdir(exist_ok=True)
     if not orig_complex_graph.success[0]:
         skipped += 1
-        print(f"HAPPENING | The test dataset did not contain {test_dataset.complex_names[idx]} for {test_dataset.ligand_descriptions[idx]} and {test_dataset.protein_files[idx]}. We are skipping this complex.")
+        error_message = f"HAPPENING | The test dataset did not contain {test_dataset.complex_names[idx]} for {test_dataset.ligand_descriptions[idx]} and {test_dataset.protein_files[idx]}. We are skipping this complex."
+        stack_trace_fp = write_dir.joinpath("error_log.txt")
+        stack_trace_fp.write_text(error_message)
+        print(error_message)
         continue
     try:
         if confidence_test_dataset is not None:
@@ -246,8 +277,6 @@ for idx, orig_complex_graph in tqdm(enumerate(test_loader)):
             ligand_pos = ligand_pos[re_order]
 
         # save predictions
-        write_dir = out_dir.joinpath(complex_name_list[idx])
-        write_dir.mkdir(exist_ok=True)
         prediction_metadata_csv = []
         for rank, pos in enumerate(ligand_pos):
             mol_pred = copy.deepcopy(lig)
@@ -274,6 +303,9 @@ for idx, orig_complex_graph in tqdm(enumerate(test_loader)):
 
     except Exception as e:
         print("Failed on", orig_complex_graph["name"], e)
+        tb = traceback.format_exc()
+        stack_trace_fp = write_dir.joinpath("error_log.txt")
+        stack_trace_fp.write_text(tb)
         failures += 1
 
 print(f'Failed for {failures} complexes')
