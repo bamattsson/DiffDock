@@ -7,11 +7,7 @@ import numpy as np
 import pandas as pd
 from rdkit import RDLogger
 from torch_geometric.loader import DataLoader
-<<<<<<< HEAD
 from rdkit.Chem import RemoveAllHs
-=======
-import traceback
->>>>>>> b5fae56... Improving error logging and skip already analysed complexes
 
 from pathlib import Path
 
@@ -272,25 +268,28 @@ for idx, orig_complex_graph in tqdm(
             confidence = confidence[:, 0]
         if confidence is not None:
             confidence = confidence.cpu().numpy()
-            re_order = np.argsort(confidence)[::-1]
-            confidence = confidence[re_order]
-            ligand_pos = ligand_pos[re_order]
 
         # save predictions
         prediction_metadata_csv = []
-        for rank, pos in enumerate(ligand_pos):
+        for id_, pos in enumerate(ligand_pos):
             mol_pred = copy.deepcopy(lig)
             if score_model_args.remove_hs: mol_pred = RemoveAllHs(mol_pred)
-            sdf_fp = os.path.join(write_dir, f'rank{rank+1}.sdf')
+            sdf_fp = os.path.join(write_dir, f'simulation_{id_}.sdf')
             write_mol_with_coords(mol_pred, pos, str(sdf_fp))
             prediction_metadata_csv.append({
-                "rank": rank + 1,
-                "confidence": confidence[rank],
+                "simulation": id_,
+                "confidence": confidence[id_],
                 "sdf_path": sdf_fp
             })
 
         prediction_metadata_csv = pd.DataFrame(prediction_metadata_csv)
-        prediction_metadata_csv.to_csv(os.path.join(write_dir, "prediction_metadata.csv"))
+        prediction_metadata_csv = prediction_metadata_csv.sort_values("confidence", ascending=False)
+        prediction_metadata_csv["rank"] = np.arange(len(prediction_metadata_csv))
+        prediction_metadata_csv.to_csv(
+            os.path.join(write_dir, "prediction_metadata.csv"),
+            columns=["rank", "simulation", "confidence", "sdf_path"],
+            index=False,
+        )
 
         # save visualisation frames
         if args.save_visualisation:
