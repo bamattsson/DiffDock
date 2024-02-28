@@ -9,6 +9,8 @@ import pandas as pd
 from rdkit import RDLogger
 from torch_geometric.loader import DataLoader
 
+from pathlib import Path
+
 from datasets.process_mols import write_mol_with_coords
 from utils.diffusion_utils import t_to_sigma as t_to_sigma_compl, get_t_schedule
 from utils.inference_utils import InferenceDataset, set_nones
@@ -41,7 +43,8 @@ parser.add_argument('--inference_steps', type=int, default=20, help='Number of d
 parser.add_argument('--actual_steps', type=int, default=None, help='Number of denoising steps that are actually performed')
 args = parser.parse_args()
 
-os.makedirs(args.out_dir, exist_ok=True)
+out_dir = Path(args.out_dir)
+out_dir.mkdir(parents=True, exist_ok=True)
 with open(f'{args.model_dir}/model_parameters.yml') as f:
     score_model_args = Namespace(**yaml.full_load(f))
 if args.confidence_model_dir is not None:
@@ -63,19 +66,23 @@ else:
     ligand_description_list = [args.ligand_description]
 
 complex_name_list = [name if name is not None else f"complex_{i}" for i, name in enumerate(complex_name_list)]
-for name in complex_name_list:
-    write_dir = f'{args.out_dir}/{name}'
-    os.makedirs(write_dir, exist_ok=True)
 
 # preprocessing of complexes into geometric graphs
 print("Loading test data in InferenceDataset class")
-test_dataset = InferenceDataset(out_dir=args.out_dir, complex_names=complex_name_list, protein_files=protein_path_list,
-                                ligand_descriptions=ligand_description_list, protein_sequences=protein_sequence_list,
-                                lm_embeddings=score_model_args.esm_embeddings_path is not None,
-                                receptor_radius=score_model_args.receptor_radius, remove_hs=score_model_args.remove_hs,
-                                c_alpha_max_neighbors=score_model_args.c_alpha_max_neighbors,
-                                all_atoms=score_model_args.all_atoms, atom_radius=score_model_args.atom_radius,
-                                atom_max_neighbors=score_model_args.atom_max_neighbors)
+test_dataset = InferenceDataset(
+    out_dir=str(out_dir.joinpath("000_esmfold")),
+    complex_names=complex_name_list,
+    protein_files=protein_path_list,
+    ligand_descriptions=ligand_description_list,
+    protein_sequences=protein_sequence_list,
+    lm_embeddings=score_model_args.esm_embeddings_path is not None,
+    receptor_radius=score_model_args.receptor_radius,
+    remove_hs=score_model_args.remove_hs,
+    c_alpha_max_neighbors=score_model_args.c_alpha_max_neighbors,
+    all_atoms=score_model_args.all_atoms,
+    atom_radius=score_model_args.atom_radius,
+    atom_max_neighbors=score_model_args.atom_max_neighbors
+)
 print("Creating DataLoader")
 test_loader = DataLoader(dataset=test_dataset, batch_size=1, shuffle=False)
 
@@ -83,7 +90,7 @@ if args.confidence_model_dir is not None and not confidence_args.use_original_mo
     print('HAPPENING | confidence model uses different type of graphs than the score model. '
           'Loading (or creating if not existing) the data for the confidence model now.')
     confidence_test_dataset = \
-        InferenceDataset(out_dir=args.out_dir, complex_names=complex_name_list, protein_files=protein_path_list,
+        InferenceDataset(out_dir=str(out_dir.joinpath("000_esmfold")), complex_names=complex_name_list, protein_files=protein_path_list,
                          ligand_descriptions=ligand_description_list, protein_sequences=protein_sequence_list,
                          lm_embeddings=confidence_args.esm_embeddings_path is not None,
                          receptor_radius=confidence_args.receptor_radius, remove_hs=confidence_args.remove_hs,
@@ -152,13 +159,23 @@ for idx, orig_complex_graph in tqdm(enumerate(test_loader)):
             visualization_list = None
 
         # run reverse diffusion
-        data_list, confidence = sampling(data_list=data_list, model=model,
-                                         inference_steps=args.actual_steps if args.actual_steps is not None else args.inference_steps,
-                                         tr_schedule=tr_schedule, rot_schedule=tr_schedule, tor_schedule=tr_schedule,
-                                         device=device, t_to_sigma=t_to_sigma, model_args=score_model_args,
-                                         visualization_list=visualization_list, confidence_model=confidence_model,
-                                         confidence_data_list=confidence_data_list, confidence_model_args=confidence_args,
-                                         batch_size=args.batch_size, no_final_step_noise=args.no_final_step_noise)
+        data_list, confidence = sampling(
+            data_list=data_list,
+            model=model,
+            inference_steps=args.actual_steps if args.actual_steps is not None else args.inference_steps,
+            tr_schedule=tr_schedule,
+            rot_schedule=tr_schedule,
+            tor_schedule=tr_schedule,
+            device=device,
+            t_to_sigma=t_to_sigma,
+            model_args=score_model_args,
+            visualization_list=visualization_list,
+            confidence_model=confidence_model,
+            confidence_data_list=confidence_data_list,
+            confidence_model_args=confidence_args,
+            batch_size=args.batch_size,
+            no_final_step_noise=args.no_final_step_noise
+        )
         ligand_pos = np.asarray([complex_graph['ligand'].pos.cpu().numpy() + orig_complex_graph.original_center.cpu().numpy() for complex_graph in data_list])
 
         # reorder predictions based on confidence output
@@ -171,13 +188,14 @@ for idx, orig_complex_graph in tqdm(enumerate(test_loader)):
             ligand_pos = ligand_pos[re_order]
 
         # save predictions
-        write_dir = f'{args.out_dir}/{complex_name_list[idx]}'
+        write_dir = out_dir.joinpath(complex_name_list[idx])
+        write_dir.mkdir(exist_ok=True)
         prediction_metadata_csv = []
         for rank, pos in enumerate(ligand_pos):
             mol_pred = copy.deepcopy(lig)
             if score_model_args.remove_hs: mol_pred = RemoveHs(mol_pred)
             sdf_fp = os.path.join(write_dir, f'rank{rank+1}.sdf')
-            write_mol_with_coords(mol_pred, pos, sdf_fp)
+            write_mol_with_coords(mol_pred, pos, str(sdf_fp))
             prediction_metadata_csv.append({
                 "rank": rank + 1,
                 "confidence": confidence[rank],
@@ -202,6 +220,6 @@ for idx, orig_complex_graph in tqdm(enumerate(test_loader)):
 
 print(f'Failed for {failures} complexes')
 print(f'Skipped {skipped} complexes')
-print(f'Results are in {args.out_dir}')
+print(f'Results are in {out_dir}')
 
 
