@@ -226,7 +226,35 @@ class InferenceDataset(Dataset):
         """
         Given an index returns an item ready for inference.
 
-        :return:
+        :return torch_geometric.data.HeteroData: complex_graph containing
+            name str: name of the complex
+            success bool: True if preprocessing worked, otherwise False
+            rmsd_matching int: what is this? always 0?
+            orinigal_center: list [2] with ?
+            mol: rdkit.Chem.rdchem.Mol object representing the ligand
+            ligand dict: describing ligand of length mol_len like
+                x: tensor [mol_len, lig_emb]
+                pos: tensor [mol_len, 3]
+                edge_mask: tensor [ligand_edges?]
+                mask_rotate: tensor [?, mol_len]
+            receptor dict: describing receptor residues
+                x: tensor [rec_res_len, rec_res_emb]
+                pos: tensor [rec_res_len, 3]
+                mu_r_norm: tensor [rec_res_len, 5?]
+                side_chain_vecs: tensor [rec_res_len, 2?, 3?]
+            (ligand, lig_bond, ligand) dict:
+                edge_index: tensor [2, num_lig_edges]
+                edge_attr: tensor [num_lig_edges, 4?]
+            (receptor, rec_contact, receptor) dict:
+                edge_index: tensor [2, num_rec_res_edges]
+            If self.all_atoms = True also contains:
+            atom dict: describing receptor atoms
+                x: tensor [rec_atom_len, rec_atom_emb]
+                pos: tensor [rec_atom_len, 3]
+            (atom, atom_contact, atom) dict:
+                edge_index: tensor [2, num_rec_atom_edges]
+            (atom, atom_rec_contact, receptor) dict:
+                edge_index: tensor [2, num_rec_res_atom_edges]
         """
 
         name, protein_file, ligand_description, lm_embedding = \
