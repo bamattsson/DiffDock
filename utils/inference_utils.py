@@ -39,7 +39,14 @@ three_to_one = {'ALA':	'A',
 'XAA':	'X',
 'XLE':	'J'}
 
-def get_sequences_from_pdbfile(file_path):
+def get_sequences_from_pdbfile(
+        file_path
+    ) -> str:
+    """
+    Creates a string with all protein sequences, each sequence separated by `:`.
+
+    Ignores any non protein fragments in the PDF file TODO: is this true?
+    """
     biopython_parser = PDBParser()
     structure = biopython_parser.get_structure('random_id', file_path)
     structure = structure[0]
@@ -212,7 +219,15 @@ class InferenceDataset(Dataset):
     def len(self):
         return len(self.complex_names)
 
-    def get(self, idx):
+    def get(
+            self,
+            idx
+        ):
+        """
+        Given an index returns an item ready for inference.
+
+        :return:
+        """
 
         name, protein_file, ligand_description, lm_embedding = \
             self.complex_names[idx], self.protein_files[idx], self.ligand_descriptions[idx], self.lm_embeddings[idx]
