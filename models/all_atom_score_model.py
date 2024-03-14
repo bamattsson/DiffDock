@@ -346,9 +346,14 @@ class TensorProductScoreModel(torch.nn.Module):
         # LIGAND to RECEPTOR
         if torch.is_tensor(lr_cross_distance_cutoff):
             # different cutoff for every graph
-            lr_edge_index = radius(data['receptor'].pos / lr_cross_distance_cutoff[data['receptor'].batch],
-                                data['ligand'].pos / lr_cross_distance_cutoff[data['ligand'].batch], 1,
-                                data['receptor'].batch, data['ligand'].batch, max_num_neighbors=10000)
+            lr_edge_index = radius(
+                data['receptor'].pos / lr_cross_distance_cutoff[data['receptor'].batch],
+                data['ligand'].pos / lr_cross_distance_cutoff[data['ligand'].batch],
+                1,
+                data['receptor'].batch,
+                data['ligand'].batch,
+                max_num_neighbors=10000
+            )
         else:
             lr_edge_index = radius(data['receptor'].pos, data['ligand'].pos, lr_cross_distance_cutoff,
                             data['receptor'].batch, data['ligand'].batch, max_num_neighbors=10000)
