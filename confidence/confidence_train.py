@@ -7,7 +7,6 @@ import shutil
 from argparse import Namespace, ArgumentParser, FileType
 import torch.nn.functional as F
 
-import wandb
 import torch
 from sklearn.metrics import roc_auc_score
 from torch_geometric.loader import DataListLoader, DataLoader
@@ -96,16 +95,13 @@ parser.add_argument('--confidence_no_batchnorm', action='store_true', default=Fa
 parser.add_argument('--confidence_dropout', type=float, default=0.0, help='MLP dropout in confidence readout')
 
 args = parser.parse_args()
-if args.config:
-    config_dict = yaml.load(args.config, Loader=yaml.FullLoader)
+cfg_fp = args.config
+if cfg_fp:
+    config_dict = yaml.load(cfg_fp, Loader=yaml.FullLoader)
     arg_dict = args.__dict__
     for key, value in config_dict.items():
-        if isinstance(value, list):
-            for v in value:
-                arg_dict[key].append(v)
-        else:
-            arg_dict[key] = value
-    args.config = args.config.name
+        arg_dict[key] = value
+    args.config = cfg_fp
 assert(args.main_metric_goal == 'max' or args.main_metric_goal == 'min')
 
 def train_epoch(model, loader, optimizer, rmsd_prediction):
@@ -216,6 +212,7 @@ def train(args, model, optimizer, scheduler, train_loader, val_loader, run_dir):
             print("Epoch {}: Validation loss {:.4f}  accuracy {:.4f}".format(epoch, val_metrics['confidence_loss'], val_metrics['accuracy']))
 
         if args.wandb:
+            import wandb
             logs.update({'valinf_' + k: v for k, v in val_metrics.items()}, step=epoch + 1)
             logs.update({'train_' + k: v for k, v in train_metrics.items()}, step=epoch + 1)
             logs.update({'mean_rmsd' if args.rmsd_prediction else 'fraction_positives': baseline_metric,
@@ -247,12 +244,20 @@ def train(args, model, optimizer, scheduler, train_loader, val_loader, run_dir):
 
 
 def construct_loader_confidence(args, device):
-    common_args = {'cache_path': args.cache_path, 'original_model_dir': args.original_model_dir, 'device': device,
-                   'inference_steps': args.inference_steps, 'samples_per_complex': args.samples_per_complex,
-                   'limit_complexes': args.limit_complexes, 'all_atoms': args.all_atoms, 'balance': args.balance,
-                   'rmsd_classification_cutoff': args.rmsd_classification_cutoff, 'use_original_model_cache': args.use_original_model_cache,
-                   'cache_creation_id': args.cache_creation_id, "cache_ids_to_combine": args.cache_ids_to_combine,
-                   "model_ckpt": args.ckpt}
+    common_args = {
+        'cache_path': args.cache_path,
+        'original_model_dir': args.original_model_dir,
+        'device': device,
+        'inference_steps': args.inference_steps,
+        'samples_per_complex': args.samples_per_complex,
+        'limit_complexes': args.limit_complexes,
+        'all_atoms': args.all_atoms, 'balance': args.balance,
+        'rmsd_classification_cutoff': args.rmsd_classification_cutoff,
+        'use_original_model_cache': args.use_original_model_cache,
+        'cache_creation_id': args.cache_creation_id,
+        "cache_ids_to_combine": args.cache_ids_to_combine,
+        "model_ckpt": args.ckpt
+    }
     loader_class = DataListLoader if torch.cuda.is_available() else DataLoader
 
     exception_flag = False

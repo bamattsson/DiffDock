@@ -75,36 +75,77 @@ class ConfidenceDataset(Dataset):
         self.samples_per_complex = samples_per_complex
         self.model_ckpt = model_ckpt
 
-        self.original_model_args, original_model_cache = get_args_and_cache_path(original_model_dir, split)
-        self.complex_graphs_cache = original_model_cache if self.use_original_model_cache else get_cache_path(args, split)
+        self.original_model_args, _ = get_args_and_cache_path(original_model_dir, split)
 
         # check if the docked positions have already been computed, if not run the preprocessing (docking every complex)
         self.full_cache_path = os.path.join(cache_path, f'model_{os.path.splitext(os.path.basename(original_model_dir))[0]}'
                                             f'_split_{split}_limit_{limit_complexes}')
 
-        if (not os.path.exists(os.path.join(self.full_cache_path, "ligand_positions.pkl")) and self.cache_creation_id is None) or \
-                (not os.path.exists(os.path.join(self.full_cache_path, f"ligand_positions_id{self.cache_creation_id}.pkl")) and self.cache_creation_id is not None):
+        print(f'Loading or recreating original model graph')
+        pdbbind_dataset = PDBBind(
+            transform=None,
+            root=self.original_model_args.data_dir,
+            limit_complexes=self.original_model_args.limit_complexes,
+            receptor_radius=self.original_model_args.receptor_radius,
+            cache_path=self.original_model_args.cache_path,
+            split_path=self.original_model_args.split_val if split == 'val' else self.original_model_args.split_train,
+            remove_hs=self.original_model_args.remove_hs,
+            max_lig_size=None,
+            c_alpha_max_neighbors=self.original_model_args.c_alpha_max_neighbors,
+            matching=not self.original_model_args.no_torsion,
+            keep_original=True,
+            popsize=self.original_model_args.matching_popsize,
+            maxiter=self.original_model_args.matching_maxiter,
+            all_atoms=self.original_model_args.all_atoms,
+            atom_radius=self.original_model_args.atom_radius,
+            atom_max_neighbors=self.original_model_args.atom_max_neighbors,
+            esm_embeddings_path=self.original_model_args.esm_embeddings_path,
+            require_ligand=True,
+            num_workers=20,
+        )
+        original_model_cache = pdbbind_dataset.full_cache_path
+        del pdbbind_dataset
+
+        if (
+            (not os.path.exists(os.path.join(self.full_cache_path, "ligand_positions.pkl"))
+             and self.cache_creation_id is None)
+             or (not os.path.exists(os.path.join(self.full_cache_path, f"ligand_positions_id{self.cache_creation_id}.pkl"))
+                 and self.cache_creation_id is not None
+                 )
+        ):
             os.makedirs(self.full_cache_path, exist_ok=True)
             self.preprocessing(original_model_cache)
 
         # load the graphs that the confidence model will use
-        print('Using the cached complex graphs of the original model args' if self.use_original_model_cache else 'Not using the cached complex graphs of the original model args. Instead the complex graphs are used that are at the location given by the dataset parameters given to confidence_train.py')
         print(self.complex_graphs_cache)
-        if not os.path.exists(os.path.join(self.complex_graphs_cache, "heterographs.pkl")):
-            print(f'HAPPENING | Complex graphs path does not exist yet: {os.path.join(self.complex_graphs_cache, "heterographs.pkl")}. For that reason, we are now creating the dataset.')
-            PDBBind(transform=None, root=args.data_dir, limit_complexes=args.limit_complexes,
-                    receptor_radius=args.receptor_radius,
-                    cache_path=args.cache_path, split_path=args.split_val if split == 'val' else args.split_train,
-                    remove_hs=args.remove_hs, max_lig_size=None,
-                    c_alpha_max_neighbors=args.c_alpha_max_neighbors,
-                    matching=not args.no_torsion, keep_original=True,
-                    popsize=args.matching_popsize,
-                    maxiter=args.matching_maxiter,
-                    all_atoms=args.all_atoms,
-                    atom_radius=args.atom_radius,
-                    atom_max_neighbors=args.atom_max_neighbors,
-                    esm_embeddings_path=args.esm_embeddings_path,
-                    require_ligand=True)
+        if self.use_original_model_cache:
+            print('Using the cached complex graphs of the original model args')
+            self.complex_graphs_cache = original_model_cache
+        else:
+            print('Not using the cached complex graphs of the original model args. Instead the complex graphs are used that are at the location given by the dataset parameters given to confidence_train.py')
+            pdbbind_dataset = PDBBind(
+                transform=None,
+                root=args.data_dir,
+                limit_complexes=args.limit_complexes,
+                receptor_radius=args.receptor_radius,
+                cache_path=args.cache_path,
+                split_path=args.split_val if split == 'val' else args.split_train,
+                remove_hs=args.remove_hs,
+                max_lig_size=None,
+                c_alpha_max_neighbors=args.c_alpha_max_neighbors,
+                matching=not args.no_torsion,
+                keep_original=True,
+                popsize=args.matching_popsize,
+                maxiter=args.matching_maxiter,
+                all_atoms=args.all_atoms,
+                atom_radius=args.atom_radius,
+                atom_max_neighbors=args.atom_max_neighbors,
+                esm_embeddings_path=args.esm_embeddings_path,
+                require_ligand=True,
+                num_workers=20,
+            )
+            self.complex_graphs_cache = pdbbind_dataset.full_cache_path
+            del pdbbind_dataset
 
         print(f'HAPPENING | Loading complex graphs from: {os.path.join(self.complex_graphs_cache, "heterographs.pkl")}')
         with open(os.path.join(self.complex_graphs_cache, "heterographs.pkl"), 'rb') as f:
@@ -218,29 +259,43 @@ class ConfidenceDataset(Dataset):
         model = model.to(self.device)
         model.eval()
 
-        tr_schedule = get_t_schedule(inference_steps=self.inference_steps)
+        tr_schedule = get_t_schedule(
+            sigma_schedule=self.original_model_args.sigma_schedule,
+            inference_steps=self.inference_steps
+        )
         rot_schedule = tr_schedule
         tor_schedule = tr_schedule
         print('common t schedule', tr_schedule)
 
-        print('HAPPENING | loading cached complexes of the original model to create the confidence dataset RMSDs and predicted positions. Doing that from: ', os.path.join(self.complex_graphs_cache, "heterographs.pkl"))
+        print('HAPPENING | loading cached complexes of the original model to create the confidence dataset RMSDs and predicted positions. Doing that from: ', os.path.join(original_model_cache, "heterographs.pkl"))
         with open(os.path.join(original_model_cache, "heterographs.pkl"), 'rb') as f:
             complex_graphs = pickle.load(f)
         dataset = ListDataset(complex_graphs)
         loader = DataLoader(dataset=dataset, batch_size=1, shuffle=False)
 
         rmsds, full_ligand_positions, names = [], [], []
+        start_batch_size = self.samples_per_complex
         for idx, orig_complex_graph in tqdm(enumerate(loader)):
             data_list = [copy.deepcopy(orig_complex_graph) for _ in range(self.samples_per_complex)]
             randomize_position(data_list, self.original_model_args.no_torsion, False, self.original_model_args.tr_sigma_max)
 
             predictions_list = None
+            batch_size = start_batch_size
             failed_convergence_counter = 0
             while predictions_list is None:
                 try:
-                    predictions_list, confidences = sampling(data_list=data_list, model=model, inference_steps=self.inference_steps,
-                                                             tr_schedule=tr_schedule, rot_schedule=rot_schedule, tor_schedule=tor_schedule,
-                                                             device=self.device, t_to_sigma=t_to_sigma, model_args=self.original_model_args)
+                    predictions_list, confidences = sampling(
+                        data_list=data_list,
+                        model=model,
+                        inference_steps=self.inference_steps,
+                        tr_schedule=tr_schedule,
+                        rot_schedule=rot_schedule,
+                        tor_schedule=tor_schedule,
+                        device=self.device,
+                        t_to_sigma=t_to_sigma,
+                        model_args=self.original_model_args,
+                        batch_size=batch_size,
+                    )
                 except Exception as e:
                     if 'failed to converge' in str(e):
                         failed_convergence_counter += 1
@@ -248,6 +303,12 @@ class ConfidenceDataset(Dataset):
                             print('| WARNING: SVD failed to converge 5 times - skipping the complex')
                             break
                         print('| WARNING: SVD failed to converge - trying again with a new sample')
+                    elif 'CUDA out of memory.' in str(e):
+                        if batch_size <= 2:
+                            print('| WARNING: CUDA OOM with batch size of 2 - skipping the complex')
+                            break
+                        batch_size = batch_size // 2
+                        print(f'| WARNING: CUDA OOM - trying with batch_size of {batch_size}')
                     else:
                         raise e
             if failed_convergence_counter > 5: predictions_list = data_list

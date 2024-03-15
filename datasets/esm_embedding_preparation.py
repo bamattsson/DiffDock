@@ -47,6 +47,7 @@ def get_structure_from_file(file_path):
 
 data_dir = args.data_dir
 names = os.listdir(data_dir)
+not_found_proteins = []
 
 if args.dataset == 'pdbbind':
     sequences = []
@@ -56,8 +57,11 @@ if args.dataset == 'pdbbind':
         if name == '.DS_Store': continue
         if os.path.exists(os.path.join(data_dir, name, f'{name}_protein_processed.pdb')):
             rec_path = os.path.join(data_dir, name, f'{name}_protein_processed.pdb')
-        else:
+        elif os.path.exists(os.path.join(data_dir, name, f'{name}_protein.pdb')):
             rec_path = os.path.join(data_dir, name, f'{name}_protein.pdb')
+        else:
+            not_found_proteins.append(name)
+            continue
         l = get_structure_from_file(rec_path)
         for i, seq in enumerate(l):
             sequences.append(seq)
@@ -68,6 +72,8 @@ if args.dataset == 'pdbbind':
         record.description = ''
         records.append(record)
     SeqIO.write(records, args.out_file, "fasta")
+
+    print("Did not find pdb files for the following proteins:", not_found_proteins)
 
 elif args.dataset == 'moad':
     names = [n[:6] for n in names]

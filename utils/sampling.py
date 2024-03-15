@@ -170,9 +170,14 @@ def sampling(data_list, model, inference_steps, tr_schedule, rot_schedule, tor_s
                     tor_perturb = (tor_g ** 2 * dt_tor * (lambda_tor + temp_sampling[2] * temp_psi[2] / 2) * tor_score + tor_g * np.sqrt(dt_tor * (1 + temp_psi[2])) * tor_z)
 
                 # Apply noise
-                complex_graph_batch['ligand'].pos = \
-                    modify_conformer_batch(complex_graph_batch['ligand'].pos, complex_graph_batch, tr_perturb, rot_perturb,
-                                           tor_perturb if not model_args.no_torsion else None, mask_rotate)
+                complex_graph_batch['ligand'].pos = modify_conformer_batch(
+                        complex_graph_batch['ligand'].pos,
+                        complex_graph_batch,
+                        tr_perturb,
+                        rot_perturb,
+                        tor_perturb if not model_args.no_torsion else None,
+                        mask_rotate
+                    )
 
                 if visualization_list is not None:
                     for idx_b in range(b):

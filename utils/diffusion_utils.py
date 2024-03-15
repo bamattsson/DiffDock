@@ -57,7 +57,16 @@ def modify_conformer(data, tr_update, rot_update, torsion_updates, pivot=None):
     return data
 
 
-def modify_conformer_batch(orig_pos, data, tr_update, rot_update, torsion_updates, mask_rotate):
+def modify_conformer_batch(
+        orig_pos,
+        data,
+        tr_update,
+        rot_update,
+        torsion_updates,
+        mask_rotate
+    ):
+    # TODO: this seems to not be safe to run if you only have one sample in the batch,
+    # consider adding an assertion to make failures clearer
     B = data.num_graphs
     N, M, R = data['ligand'].num_nodes // B, data['ligand', 'ligand'].num_edges // B, data['ligand'].edge_mask.sum().item() // B
 
