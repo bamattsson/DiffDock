@@ -117,6 +117,10 @@ print(f"DiffDock will run on {device}")
 
 if args.protein_ligand_csv is not None:
     df = pd.read_csv(args.protein_ligand_csv)
+    for id_, row in df.iterrows():
+        if str(row["complex_name"]) == "nan":
+            df.loc[id_, "complex_name"] = f"complex_{id_}"
+
     def complex_already_calculated(complex_name):
         complex_folder_path = out_dir.joinpath(complex_name)
         if not complex_folder_path.exists():
@@ -132,6 +136,7 @@ if args.protein_ligand_csv is not None:
         ):
             return True
         return False
+
     already_calculated_complexes = df["complex_name"].apply(complex_already_calculated)
     print(
         f"Skipping {already_calculated_complexes.sum()} already calculated complexes"
@@ -146,8 +151,6 @@ else:
     protein_path_list = [args.protein_path]
     protein_sequence_list = [args.protein_sequence]
     ligand_description_list = [args.ligand_description]
-
-complex_name_list = [name if name is not None else f"complex_{i}" for i, name in enumerate(complex_name_list)]
 
 # preprocessing of complexes into geometric graphs
 print("Loading test data in InferenceDataset class")
