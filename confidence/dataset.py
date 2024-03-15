@@ -117,10 +117,10 @@ class ConfidenceDataset(Dataset):
             self.preprocessing(original_model_cache)
 
         # load the graphs that the confidence model will use
-        print(self.complex_graphs_cache)
         if self.use_original_model_cache:
             print('Using the cached complex graphs of the original model args')
             self.complex_graphs_cache = original_model_cache
+            print(self.complex_graphs_cache)
         else:
             print('Not using the cached complex graphs of the original model args. Instead the complex graphs are used that are at the location given by the dataset parameters given to confidence_train.py')
             pdbbind_dataset = PDBBind(
@@ -273,9 +273,30 @@ class ConfidenceDataset(Dataset):
         dataset = ListDataset(complex_graphs)
         loader = DataLoader(dataset=dataset, batch_size=1, shuffle=False)
 
+        cache_id_str = '' if self.cache_creation_id is None else '_id' + str(self.cache_creation_id)
+        complex_results_cache_folder = os.path.join(
+            self.full_cache_path,
+            f"complex_cache{cache_id_str}/"
+        )
+        os.makedirs(complex_results_cache_folder, exist_ok=True)
         rmsds, full_ligand_positions, names = [], [], []
         start_batch_size = self.samples_per_complex
         for idx, orig_complex_graph in tqdm(enumerate(loader)):
+            assert(len(orig_complex_graph.name) == 1), "there should only be one name"
+            name = orig_complex_graph.name[0]
+            complex_pickle_fp = os.path.join(
+                complex_results_cache_folder,
+                f"{name}.pkl"
+            )
+            if os.path.exists(complex_pickle_fp):
+                with open(complex_pickle_fp, "rb") as f:
+                    (complex_full_ligand_positions, rmsd) = pickle.load(f)
+                rmsds.append(rmsd)
+                full_ligand_positions.append(complex_full_ligand_positions)
+                names.append(name)
+                print(f"{name} found in cache, skipping.")
+                continue
+
             data_list = [copy.deepcopy(orig_complex_graph) for _ in range(self.samples_per_complex)]
             randomize_position(data_list, self.original_model_args.no_torsion, False, self.original_model_args.tr_sigma_max)
 
@@ -325,13 +346,15 @@ class ConfidenceDataset(Dataset):
             rmsd = np.sqrt(((ligand_pos - orig_ligand_pos) ** 2).sum(axis=2).mean(axis=1))
 
             rmsds.append(rmsd)
-            full_ligand_positions.append(np.asarray([complex_graph['ligand'].pos.cpu().numpy() for complex_graph in predictions_list]))
-            names.append(orig_complex_graph.name[0])
-            assert(len(orig_complex_graph.name) == 1) # I just put this assert here because of the above line where I assumed that the list is always only lenght 1. Just in case it isn't maybe check what the names in there are.
-        with open(os.path.join(self.full_cache_path, f"ligand_positions{'' if self.cache_creation_id is None else '_id' + str(self.cache_creation_id)}.pkl"), 'wb') as f:
+            complex_full_ligand_positions = np.asarray([complex_graph['ligand'].pos.cpu().numpy() for complex_graph in predictions_list])
+            full_ligand_positions.append(complex_full_ligand_positions)
+            names.append(name)
+            with open(complex_pickle_fp, "wb") as f:
+                pickle.dump((complex_full_ligand_positions, rmsd), f)
+
+        ligand_pos_fp = os.path.join(self.full_cache_path, f"ligand_positions{cache_id_str}.pkl")
+        with open(ligand_pos_fp, 'wb') as f:
             pickle.dump((full_ligand_positions, rmsds), f)
-        with open(os.path.join(self.full_cache_path, f"complex_names_in_same_order{'' if self.cache_creation_id is None else '_id' + str(self.cache_creation_id)}.pkl"), 'wb') as f:
+        complex_names_fp = os.path.join(self.full_cache_path, f"complex_names_in_same_order{cache_id_str}.pkl")
+        with open(complex_names_fp, 'wb') as f:
             pickle.dump((names), f)
-
-
-
