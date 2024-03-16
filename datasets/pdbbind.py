@@ -326,6 +326,7 @@ class PDBBind(Dataset):
                 reordered_chains = [complex_chains_embeddings[i] for i in chain_reorder_idx]
                 lm_embeddings_chains_all.append(reordered_chains)
         else:
+            print("WARN | esm_embeddings were not available, adding None instead")
             lm_embeddings_chains_all = [None] * len(complex_names_all)
 
         # running preprocessing in parallel on multiple workers and saving the progress every 1000 complexes
