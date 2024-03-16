@@ -101,7 +101,7 @@ if cfg_fp:
     arg_dict = args.__dict__
     for key, value in config_dict.items():
         arg_dict[key] = value
-    args.config = cfg_fp
+    args.config = cfg_fp.name
 assert(args.main_metric_goal == 'max' or args.main_metric_goal == 'min')
 
 def train_epoch(model, loader, optimizer, rmsd_prediction):
@@ -114,6 +114,7 @@ def train_epoch(model, loader, optimizer, rmsd_prediction):
         optimizer.zero_grad()
         try:
             pred = model(data)
+            pred = pred[0]
             if rmsd_prediction:
                 labels = torch.cat([graph.rmsd for graph in data]).to(device) if isinstance(data, list) else data.rmsd
                 confidence_loss = F.mse_loss(pred, labels)
@@ -149,6 +150,7 @@ def test_epoch(model, loader, rmsd_prediction):
         try:
             with torch.no_grad():
                 pred = model(data)
+                pred = pred[0]
             affinity_loss = torch.tensor(0.0, dtype=torch.float, device=pred[0].device)
             accuracy = torch.tensor(0.0, dtype=torch.float, device=pred[0].device)
             if rmsd_prediction:
