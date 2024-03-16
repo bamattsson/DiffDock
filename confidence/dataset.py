@@ -211,14 +211,20 @@ class ConfidenceDataset(Dataset):
         complex_graph = copy.deepcopy(self.complex_graph_dict[self.dataset_names[idx]])
         positions, rmsds = self.positions_rmsds_dict[self.dataset_names[idx]]
 
+        # Filtering out nan rmsds
+        keep_idx = np.isfinite(rmsds)
+        positions = positions[keep_idx, :]
+        rmsds = rmsds[keep_idx]
+        num_samples = sum(keep_idx)
+
         if self.balance:
             if isinstance(self.rmsd_classification_cutoff, list): raise ValueError("a list for --rmsd_classification_cutoff can only be used without --balance")
             label = random.randint(0, 1)
             success = rmsds < self.rmsd_classification_cutoff
             n_success = np.count_nonzero(success)
-            if label == 0 and n_success != self.all_samples_per_complex:
+            if label == 0 and n_success != num_samples:
                 # sample negative complex
-                sample = random.randint(0, self.all_samples_per_complex - n_success - 1)
+                sample = random.randint(0, num_samples - n_success - 1)
                 lig_pos = positions[~success][sample]
                 complex_graph['ligand'].pos = torch.from_numpy(lig_pos)
             else:
@@ -229,7 +235,7 @@ class ConfidenceDataset(Dataset):
                     complex_graph['ligand'].pos = torch.from_numpy(lig_pos)
             complex_graph.y = torch.tensor(label).float()
         else:
-            sample = random.randint(0, self.all_samples_per_complex - 1)
+            sample = random.randint(0, num_samples - 1)
             complex_graph['ligand'].pos = torch.from_numpy(positions[sample])
             complex_graph.y = torch.tensor(rmsds[sample] < self.rmsd_classification_cutoff).float().unsqueeze(0)
             if isinstance(self.rmsd_classification_cutoff, list):
