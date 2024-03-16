@@ -2,6 +2,7 @@ import binascii
 import glob
 import os
 import pickle
+from typing import Dict
 from collections import defaultdict
 from multiprocessing import Pool
 import random
@@ -20,6 +21,53 @@ from datasets.process_mols import read_molecule, get_lig_graph_with_matching, ge
 from utils.diffusion_utils import modify_conformer, set_time
 from utils.utils import read_strings_from_txt, crop_beyond
 from utils import so3, torus
+
+
+def model_conf_to_pdb_args(
+        model_conf_args,
+        split_path,
+        keep_original=True,
+        require_ligand=False,
+        transform=None,
+        num_workers=None,
+    ) -> Dict:
+    """Get arguments to instantiate PDB."""
+
+    args_from_model_conf = {
+        "limit_complexes": model_conf_args.limit_complexes,
+        'chain_cutoff': model_conf_args.chain_cutoff,
+        "receptor_radius": model_conf_args.receptor_radius,
+        "c_alpha_max_neighbors": model_conf_args.c_alpha_max_neighbors,
+        "remove_hs": model_conf_args.remove_hs,
+        "max_lig_size": model_conf_args.max_lig_size,
+        "matching": not model_conf_args.no_torsion,
+        "popsize": model_conf_args.matching_popsize,
+        "maxiter": model_conf_args.matching_maxiter,
+        "all_atoms": model_conf_args.all_atoms,
+        "atom_radius": model_conf_args.atom_radius,
+        "atom_max_neighbors": model_conf_args.atom_max_neighbors,
+        "knn_only_graph": not getattr(model_conf_args, 'not_knn_only_graph', True),
+        "include_miscellaneous_atoms": getattr(model_conf_args, 'include_miscellaneous_atoms', False),
+        "matching_tries": model_conf_args.matching_tries,
+        "num_conformers": model_conf_args.num_conformers,
+        "root": model_conf_args.data_dir,
+        "cache_path": model_conf_args.cache_path,
+        "esm_embeddings_path": model_conf_args.esm_embeddings_path,
+        "num_workers": int(getattr(model_conf_args, "num_workers", 1))
+    }
+
+    all_args = {
+        **args_from_model_conf,
+        "split_path": split_path,
+        "keep_original": keep_original,
+        "transform": transform,
+        "require_ligand": require_ligand,
+    }
+
+    if num_workers is not None:
+        all_args["num_workers"] = num_workers
+
+    return all_args
 
 
 class NoiseTransform(BaseTransform):
