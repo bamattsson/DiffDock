@@ -15,7 +15,7 @@ from torch_geometric.data import Dataset, Data
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
-from datasets.pdbbind import PDBBind
+from datasets.pdbbind import PDBBind, model_conf_to_pdb_args
 from utils.diffusion_utils import get_t_schedule
 from utils.sampling import randomize_position, sampling
 from utils.utils import get_model
@@ -82,26 +82,16 @@ class ConfidenceDataset(Dataset):
                                             f'_split_{split}_limit_{limit_complexes}')
 
         print(f'Loading or recreating original model graph')
-        pdbbind_dataset = PDBBind(
-            transform=None,
-            root=self.original_model_args.data_dir,
-            limit_complexes=self.original_model_args.limit_complexes,
-            receptor_radius=self.original_model_args.receptor_radius,
-            cache_path=self.original_model_args.cache_path,
+        original_model_pdb_args = model_conf_to_pdb_args(
+            self.original_model_args,
             split_path=self.original_model_args.split_val if split == 'val' else self.original_model_args.split_train,
-            remove_hs=self.original_model_args.remove_hs,
-            max_lig_size=None,
-            c_alpha_max_neighbors=self.original_model_args.c_alpha_max_neighbors,
-            matching=not self.original_model_args.no_torsion,
             keep_original=True,
-            popsize=self.original_model_args.matching_popsize,
-            maxiter=self.original_model_args.matching_maxiter,
-            all_atoms=self.original_model_args.all_atoms,
-            atom_radius=self.original_model_args.atom_radius,
-            atom_max_neighbors=self.original_model_args.atom_max_neighbors,
-            esm_embeddings_path=self.original_model_args.esm_embeddings_path,
             require_ligand=True,
-            num_workers=20,
+            transform=None,
+            num_workers=1,
+        )
+        pdbbind_dataset = PDBBind(
+            **original_model_pdb_args,
         )
         original_model_cache = pdbbind_dataset.full_cache_path
         del pdbbind_dataset
@@ -123,26 +113,16 @@ class ConfidenceDataset(Dataset):
             print(self.complex_graphs_cache)
         else:
             print('Not using the cached complex graphs of the original model args. Instead the complex graphs are used that are at the location given by the dataset parameters given to confidence_train.py')
-            pdbbind_dataset = PDBBind(
-                transform=None,
-                root=args.data_dir,
-                limit_complexes=args.limit_complexes,
-                receptor_radius=args.receptor_radius,
-                cache_path=args.cache_path,
+            conf_model_pdb_args = model_conf_to_pdb_args(
+                args,
                 split_path=args.split_val if split == 'val' else args.split_train,
-                remove_hs=args.remove_hs,
-                max_lig_size=None,
-                c_alpha_max_neighbors=args.c_alpha_max_neighbors,
-                matching=not args.no_torsion,
                 keep_original=True,
-                popsize=args.matching_popsize,
-                maxiter=args.matching_maxiter,
-                all_atoms=args.all_atoms,
-                atom_radius=args.atom_radius,
-                atom_max_neighbors=args.atom_max_neighbors,
-                esm_embeddings_path=args.esm_embeddings_path,
                 require_ligand=True,
-                num_workers=20,
+                transform=None,
+                num_workers=1,
+            )
+            pdbbind_dataset = PDBBind(
+                **conf_model_pdb_args,
             )
             self.complex_graphs_cache = pdbbind_dataset.full_cache_path
             del pdbbind_dataset
