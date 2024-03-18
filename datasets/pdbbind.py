@@ -168,6 +168,9 @@ RDKIT_LIGAND_CACHE_SUBFOLDER = "rdkit_ligands_folder"
 
 
 class PDBBind(Dataset):
+
+    HETEROGRAPH_LIST_FP = "heterograph_fps.txt"
+    RDKIT_LIGAND_LIST_FP = "rdkit_ligand_fps.txt"
     def __init__(
             self,
             root,
@@ -266,22 +269,41 @@ class PDBBind(Dataset):
                 self.preprocessing()
             else:
                 self.inference_preprocessing()
+        else:
+            with open(os.path.join(
+                self.full_cache_path,
+                self.HETEROGRAPH_LIST_FP,
+                ), 'rt'
+            ) as f:
+                self.complex_graph_fps = f.read().split("\n")
 
-        self.complex_graphs, self.rdkit_ligands = self.collect_all_complexes()
-        print_statistics(self.complex_graphs)
-        list_names = [complex['name'] for complex in self.complex_graphs]
+            with open(os.path.join(
+                self.full_cache_path,
+                self.RDKIT_LIGAND_LIST_FP,
+                ), 'rt'
+            ) as f:
+                self.rdkit_ligand_fps = f.read().split("\n")
+
+        print_statistics(self.complex_graph_fps)
+        list_names = []
+        for complex_graph_fp in self.complex_graph_fps:
+            with open(complex_graph_fp, "rb") as f:
+                list_names.append(pickle.load(f)[0]["name"])
         list_name_txt_fp = os.path.join(self.full_cache_path, f'pdbbind_{os.path.splitext(os.path.basename(self.split_path))[0][:3]}_names.txt')
         if not os.path.exists(list_name_txt_fp):
             with open(list_name_txt_fp, 'w') as f:
                 f.write('\n'.join(list_names))
 
     def len(self):
-        return len(self.complex_graphs)
+        return len(self.complex_graph_fps)
 
     def get(self, idx):
-        complex_graph = copy.deepcopy(self.complex_graphs[idx])
+        with open(self.complex_graph_fps[idx], "rb") as f:
+            complex_graph = pickle.load(f)[0]
         if self.require_ligand:
-            complex_graph.mol = RemoveAllHs(copy.deepcopy(self.rdkit_ligands[idx]))
+            with open(self.rdkit_ligand_fps[idx], "rb") as f:
+                mol = pickle.load(f)[0]
+            complex_graph.mol = RemoveAllHs(mol)
 
         for a in ['random_coords', 'coords', 'seq', 'sequence', 'mask', 'rmsd_matching', 'cluster', 'orig_seq', 'to_keep', 'chain_ids']:
             if hasattr(complex_graph, a):
@@ -428,6 +450,10 @@ class PDBBind(Dataset):
             ctx = torch.multiprocessing.get_context('spawn')
             p = ctx.Pool(self.num_workers)
             p.__enter__()
+            original_torch_mp_sharing_strategy = torch.multiprocessing.get_sharing_strategy()
+            if "file_descriptor" in torch.multiprocessing.get_all_sharing_strategies():
+                print("setting sharing strategy to file_descriptor")
+                torch.multiprocessing.set_sharing_strategy("file_descriptor")
         subset_of_self = get_namespace_with_needed_attributes(self)
         with tqdm(
             total=len(sample_names_remaining),
@@ -447,25 +473,28 @@ class PDBBind(Dataset):
                 complex_graph_fps.extend(t[0])
                 rdkit_ligand_fps.extend(t[1])
                 pbar.update()
-        if self.num_workers > 1: p.__exit__(None, None, None)
+        if self.num_workers > 1:
+            p.__exit__(None, None, None)
+            torch.multiprocessing.set_sharing_strategy(original_torch_mp_sharing_strategy)
 
         print(f"Finished processing all complexes.")
-        complex_graphs, rdkit_ligands = [], []
-        for fp in complex_graph_fps:
-            with open(fp, "rb") as f:
-                complex_graphs.extend(pickle.load(f))
-        for fp in rdkit_ligand_fps:
-            with open(fp, "rb") as f:
-                rdkit_ligands.extend(pickle.load(f))
+        self.complex_graph_fps = complex_graph_fps
+        with open(os.path.join(
+            self.full_cache_path,
+            self.HETEROGRAPH_LIST_FP,
+        ), 'wt') as f:
+            f.write("\n".join(self.complex_graph_fps))
 
-        with open(os.path.join(self.full_cache_path, f"heterographs.pkl"), 'wb') as f:
-            pickle.dump((complex_graphs), f)
-        with open(os.path.join(self.full_cache_path, f"rdkit_ligands.pkl"), 'wb') as f:
-            pickle.dump((rdkit_ligands), f)
-        print(f"Dumped all complexes.")
+        self.rdkit_ligand_fps = rdkit_ligand_fps
+        with open(os.path.join(
+            self.full_cache_path,
+            self.RDKIT_LIGAND_LIST_FP,
+        ), 'wt') as f:
+            f.write("\n".join(self.rdkit_ligand_fps))
+        print(f"Saved lists with all processed data points.")
 
     def check_all_complexes(self):
-        if os.path.exists(os.path.join(self.full_cache_path, f"heterographs.pkl")):
+        if os.path.exists(os.path.join(self.full_cache_path, self.HETEROGRAPH_LIST_FP)):
             return True
 
     def collect_all_complexes(self):
@@ -592,11 +621,13 @@ def process_and_save_complexes(
     return [heterograph_fp], [rdkit_ligand_fp]
 
 
-def print_statistics(complex_graphs):
+def print_statistics(complex_graph_fps):
     statistics = ([], [], [], [], [], [])
     receptor_sizes = []
 
-    for complex_graph in complex_graphs:
+    for complex_graph_fp in tqdm(complex_graph_fps, "Calculating statistics"):
+        with open(complex_graph_fp, 'rb') as f:
+            complex_graph = pickle.load(f)[0]
         lig_pos = complex_graph['ligand'].pos if torch.is_tensor(complex_graph['ligand'].pos) else complex_graph['ligand'].pos[0]
         receptor_sizes.append(complex_graph['receptor'].pos.shape[0])
         radius_protein = torch.max(torch.linalg.vector_norm(complex_graph['receptor'].pos, dim=1))
@@ -618,7 +649,7 @@ def print_statistics(complex_graphs):
     if len(statistics[5]) == 0:
         statistics[5].append(-1)
     name = ['radius protein', 'radius molecule', 'distance protein-mol', 'rmsd matching', 'random coordinates', 'random rmsd matching']
-    print('Number of complexes: ', len(complex_graphs))
+    print('Number of complexes: ', len(complex_graph_fps))
     for i in range(len(name)):
         array = np.asarray(statistics[i])
         print(f"{name[i]}: mean {np.mean(array)}, std {np.std(array)}, max {np.max(array)}")
