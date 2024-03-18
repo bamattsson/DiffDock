@@ -2,9 +2,8 @@ import binascii
 import glob
 import os
 import pickle
-from typing import Dict
+from typing import Dict, Any
 from collections import defaultdict
-from multiprocessing import Pool
 import random
 import copy
 import torch.nn.functional as F
@@ -16,6 +15,7 @@ from torch_geometric.data import Dataset, HeteroData
 from torch_geometric.transforms import BaseTransform
 from tqdm import tqdm
 from rdkit.Chem import RemoveAllHs
+from types import SimpleNamespace
 
 from datasets.process_mols import read_molecule, get_lig_graph_with_matching, generate_conformer, moad_extract_receptor_structure
 from utils.diffusion_utils import modify_conformer, set_time
@@ -163,6 +163,10 @@ class NoiseTransform(BaseTransform):
         return data
 
 
+HETEROGRAPH_CACHE_SUBFOLDER = "heterographs_folder"
+RDKIT_LIGAND_CACHE_SUBFOLDER = "rdkit_ligands_folder"
+
+
 class PDBBind(Dataset):
     def __init__(
             self,
@@ -250,6 +254,14 @@ class PDBBind(Dataset):
         self.atom_radius, self.atom_max_neighbors = atom_radius, atom_max_neighbors
         if not self.check_all_complexes():
             os.makedirs(self.full_cache_path, exist_ok=True)
+            os.makedirs(
+                os.path.join(self.full_cache_path, HETEROGRAPH_CACHE_SUBFOLDER),
+                exist_ok=True
+            )
+            os.makedirs(
+                os.path.join(self.full_cache_path, RDKIT_LIGAND_CACHE_SUBFOLDER),
+                exist_ok=True
+            )
             if protein_path_list is None or ligand_descriptions is None:
                 self.preprocessing()
             else:
@@ -279,28 +291,6 @@ class PDBBind(Dataset):
 
         return complex_graph
 
-    def collect_and_pickle_subcaches_into_one(
-            self,
-            list_indices,
-
-    ):
-        complex_graphs_all = []
-        for i in list_indices:
-            with open(os.path.join(self.full_cache_path, f"heterographs{i}.pkl"), 'rb') as f:
-                print(i)
-                l = pickle.load(f)
-                complex_graphs_all.extend(l)
-        with open(os.path.join(self.full_cache_path, "heterographs.pkl"), "wb") as f:
-            pickle.dump((complex_graphs_all), f)
-
-        rdkit_ligands_all = []
-        for i in list_indices:
-            with open(os.path.join(self.full_cache_path, f"rdkit_ligands{i}.pkl"), 'rb') as f:
-                l = pickle.load(f)
-                rdkit_ligands_all.extend(l)
-        with open(os.path.join(self.full_cache_path, "rdkit_ligands.pkl"), "wb") as f:
-            pickle.dump((complex_graphs_all), f)
-
     def preprocessing(self):
         print(f'Processing complexes from [{self.split_path}] and saving it to [{self.full_cache_path}]')
 
@@ -308,6 +298,8 @@ class PDBBind(Dataset):
         if self.limit_complexes is not None and self.limit_complexes != 0:
             complex_names_all = complex_names_all[:self.limit_complexes]
         print(f'Loading {len(complex_names_all)} complexes.')
+
+        assert len(complex_names_all) == len(set(complex_names_all)), "names need to be unique"
 
         if self.esm_embeddings_path is not None:
             id_to_embeddings = torch.load(self.esm_embeddings_path)
@@ -329,32 +321,14 @@ class PDBBind(Dataset):
             print("WARN | esm_embeddings were not available, adding None instead")
             lm_embeddings_chains_all = [None] * len(complex_names_all)
 
-        # running preprocessing in parallel on multiple workers and saving the progress every 1000 complexes
-        list_indices = list(range(len(complex_names_all)//1000+1))
-        random.shuffle(list_indices)
-        for i in list_indices:
-            if os.path.exists(os.path.join(self.full_cache_path, f"heterographs{i}.pkl")):
-                continue
-            complex_names = complex_names_all[1000*i:1000*(i+1)]
-            lm_embeddings_chains = lm_embeddings_chains_all[1000*i:1000*(i+1)]
-            complex_graphs, rdkit_ligands = [], []
-            if self.num_workers > 1:
-                p = Pool(self.num_workers, maxtasksperchild=1)
-                p.__enter__()
-            with tqdm(total=len(complex_names), desc=f'loading complexes {i}/{len(complex_names_all)//1000+1}') as pbar:
-                map_fn = p.imap_unordered if self.num_workers > 1 else map
-                for t in map_fn(self.get_complex, zip(complex_names, lm_embeddings_chains, [None] * len(complex_names), [None] * len(complex_names))):
-                    complex_graphs.extend(t[0])
-                    rdkit_ligands.extend(t[1])
-                    pbar.update()
-            if self.num_workers > 1: p.__exit__(None, None, None)
-
-            with open(os.path.join(self.full_cache_path, f"heterographs{i}.pkl"), 'wb') as f:
-                pickle.dump((complex_graphs), f)
-            with open(os.path.join(self.full_cache_path, f"rdkit_ligands{i}.pkl"), 'wb') as f:
-                pickle.dump((rdkit_ligands), f)
-
-        self.collect_and_pickle_subcaches_into_one(list_indices)
+        # Processing all the claims, dumping pickled outputs in a temporary folder
+        self.preprocess_all_remaining_complexes(
+            complex_names_all,
+            complex_names_all,
+            [None] * len(complex_names_all),
+            [None] * len(complex_names_all),
+            lm_embeddings_chains_all,
+        )
 
     def inference_preprocessing(self):
         ligands_list = []
@@ -386,47 +360,113 @@ class PDBBind(Dataset):
         else:
             lm_embeddings_chains_all = [None] * len(self.protein_path_list)
 
+        sample_names = [str(num) for num in range(self.ligand_descriptions)]
+
+        self.preprocess_all_remaining_complexes(
+            sample_names,
+            self.protein_path_list,
+            self.ligand_descriptions,
+            ligands_list,
+            lm_embeddings_chains_all,
+        )
+
+    def preprocess_all_remaining_complexes(
+            self,
+            cache_names,
+            protein_paths,
+            ligand_descriptions,
+            ligands_list,
+            lm_embeddings_chains_all,
+    ):
+        """
+        Processing all the claims, saving in a temporary folder, aggregating all into final outputs.
+        """
         print('Generating graphs for ligands and proteins')
-        # running preprocessing in parallel on multiple workers and saving the progress every 1000 complexes
-        list_indices = list(range(len(self.protein_path_list)//1000+1))
-        random.shuffle(list_indices)
-        for i in list_indices:
-            if os.path.exists(os.path.join(self.full_cache_path, f"heterographs{i}.pkl")):
-                continue
-            protein_paths_chunk = self.protein_path_list[1000*i:1000*(i+1)]
-            ligand_description_chunk = self.ligand_descriptions[1000*i:1000*(i+1)]
-            ligands_chunk = ligands_list[1000 * i:1000 * (i + 1)]
-            lm_embeddings_chains = lm_embeddings_chains_all[1000*i:1000*(i+1)]
-            complex_graphs, rdkit_ligands = [], []
-            if self.num_workers > 1:
-                p = Pool(self.num_workers, maxtasksperchild=1)
-                p.__enter__()
-            with tqdm(total=len(protein_paths_chunk), desc=f'loading complexes {i}/{len(protein_paths_chunk)//1000+1}') as pbar:
-                map_fn = p.imap_unordered if self.num_workers > 1 else map
-                for t in map_fn(self.get_complex, zip(protein_paths_chunk, lm_embeddings_chains, ligands_chunk,ligand_description_chunk)):
-                    complex_graphs.extend(t[0])
-                    rdkit_ligands.extend(t[1])
-                    pbar.update()
-            if self.num_workers > 1: p.__exit__(None, None, None)
 
-            with open(os.path.join(self.full_cache_path, f"heterographs{i}.pkl"), 'wb') as f:
-                pickle.dump((complex_graphs), f)
-            with open(os.path.join(self.full_cache_path, f"rdkit_ligands{i}.pkl"), 'wb') as f:
-                pickle.dump((rdkit_ligands), f)
+        sample_names_remaining = []
+        protein_paths_remaining = []
+        ligand_descriptions_remaining = []
+        ligands_remaining = []
+        lm_embeddings_chains_remaining = []
 
-        self.collect_and_pickle_subcaches_into_one(list_indices)
+        complex_graph_fps, rdkit_ligand_fps = [], []
+        for cache_name, protein_path, ligand_desc, ligand, lm_embeddings_chains in zip(
+            cache_names,
+            protein_paths,
+            ligand_descriptions,
+            ligands_list,
+            lm_embeddings_chains_all,
+        ):
+            heterograph_fp = os.path.join(
+                self.full_cache_path,
+                HETEROGRAPH_CACHE_SUBFOLDER,
+                f"{cache_name}.pkl"
+            )
+            rdkit_ligand_fp = os.path.join(
+                self.full_cache_path,
+                RDKIT_LIGAND_CACHE_SUBFOLDER,
+                f"{cache_name}.pkl"
+            )
+            if os.path.exists(heterograph_fp) and os.path.exists(rdkit_ligand_fp):
+                complex_graph_fps.append(heterograph_fp)
+                rdkit_ligand_fps.append(rdkit_ligand_fp)
+            else:
+                sample_names_remaining.append(cache_name)
+                protein_paths_remaining.append(protein_path)
+                ligand_descriptions_remaining.append(ligand_desc)
+                ligands_remaining.append(ligand)
+                lm_embeddings_chains_remaining.append(lm_embeddings_chains)
+
+        print(f"Processing remaining {len(sample_names_remaining)} / {len(cache_names)} samples.")
+
+        if self.num_workers > 1:
+            # Note: multiprocessing leaks open file_handles, causing the program to be killed
+            # unless you set ulimit -n to a large number, e.g. 30000
+            # TODO: look into this, possible cause: the passing of lm_embeddings_chains_remaining
+            # through the pipe into imap (as the ever increasing amount of open files
+            # is from torch)
+            ctx = torch.multiprocessing.get_context('spawn')
+            p = ctx.Pool(self.num_workers)
+            p.__enter__()
+        subset_of_self = get_namespace_with_needed_attributes(self)
+        with tqdm(
+            total=len(sample_names_remaining),
+            desc=f'Loading samples:') as pbar:
+            map_fn = p.imap_unordered if self.num_workers > 1 else map
+            for t in map_fn(
+                process_and_save_complexes,
+                zip(
+                    [subset_of_self] * len(sample_names_remaining),
+                    cache_names,
+                    protein_paths_remaining,
+                    lm_embeddings_chains_remaining,
+                    ligands_remaining,
+                    ligand_descriptions_remaining,
+                ),
+                ):
+                complex_graph_fps.extend(t[0])
+                rdkit_ligand_fps.extend(t[1])
+                pbar.update()
+        if self.num_workers > 1: p.__exit__(None, None, None)
+
+        print(f"Finished processing all complexes.")
+        complex_graphs, rdkit_ligands = [], []
+        for fp in complex_graph_fps:
+            with open(fp, "rb") as f:
+                complex_graphs.extend(pickle.load(f))
+        for fp in rdkit_ligand_fps:
+            with open(fp, "rb") as f:
+                rdkit_ligands.extend(pickle.load(f))
+
+        with open(os.path.join(self.full_cache_path, f"heterographs.pkl"), 'wb') as f:
+            pickle.dump((complex_graphs), f)
+        with open(os.path.join(self.full_cache_path, f"rdkit_ligands.pkl"), 'wb') as f:
+            pickle.dump((rdkit_ligands), f)
+        print(f"Dumped all complexes.")
 
     def check_all_complexes(self):
         if os.path.exists(os.path.join(self.full_cache_path, f"heterographs.pkl")):
             return True
-
-        complex_names_all = read_strings_from_txt(self.split_path)
-        if self.limit_complexes is not None and self.limit_complexes != 0:
-            complex_names_all = complex_names_all[:self.limit_complexes]
-        for i in range(len(complex_names_all) // 1000 + 1):
-            if not os.path.exists(os.path.join(self.full_cache_path, f"heterographs{i}.pkl")):
-                return False
-        return True
 
     def collect_all_complexes(self):
         print('Collecting all complexes from cache', self.full_cache_path)
@@ -440,84 +480,116 @@ class PDBBind(Dataset):
                 rdkit_ligands = None
             return complex_graphs, rdkit_ligands
 
-        complex_names_all = read_strings_from_txt(self.split_path)
-        if self.limit_complexes is not None and self.limit_complexes != 0:
-            complex_names_all = complex_names_all[:self.limit_complexes]
-        complex_graphs_all = []
-        for i in range(len(complex_names_all) // 1000 + 1):
-            with open(os.path.join(self.full_cache_path, f"heterographs{i}.pkl"), 'rb') as f:
-                print(i)
-                l = pickle.load(f)
-                complex_graphs_all.extend(l)
 
-        rdkit_ligands_all = []
-        for i in range(len(complex_names_all) // 1000 + 1):
-            with open(os.path.join(self.full_cache_path, f"rdkit_ligands{i}.pkl"), 'rb') as f:
-                l = pickle.load(f)
-                rdkit_ligands_all.extend(l)
+def get_namespace_with_needed_attributes(pdbbind_obj):
 
-        return complex_graphs_all, rdkit_ligands_all
+    NEEDED_ATTRIBUTES = [
+        "pdbbind_dir",
+        "ligand_file",
+        "max_lig_size",
+        "popsize",
+        "maxiter",
+        "matching",
+        "keep_original",
+        "num_conformers",
+        "remove_hs",
+        "matching_tries",
+        "protein_file",
+        "receptor_radius",
+        "c_alpha_max_neighbors",
+        "knn_only_graph",
+        "all_atoms",
+        "atom_radius",
+        "atom_max_neighbors",
+        "dataset",
+        "full_cache_path",
+    ]
 
-    def get_complex(self, par):
-        name, lm_embedding_chains, ligand, ligand_description = par
-        if not os.path.exists(os.path.join(self.pdbbind_dir, name)) and ligand is None:
-            print("Folder not found", name)
+    dict_ = {na: getattr(pdbbind_obj, na) for na in NEEDED_ATTRIBUTES}
+
+    return SimpleNamespace(**dict_)
+
+
+def process_and_save_complexes(
+        par,
+    ):
+    self, cache_name, name, lm_embedding_chains, ligand, ligand_description = par
+    heterograph_fp = os.path.join(
+        self.full_cache_path,
+        HETEROGRAPH_CACHE_SUBFOLDER,
+        f"{cache_name}.pkl"
+    )
+    rdkit_ligand_fp = os.path.join(
+        self.full_cache_path,
+        RDKIT_LIGAND_CACHE_SUBFOLDER,
+        f"{cache_name}.pkl"
+    )
+    if os.path.exists(heterograph_fp) and os.path.exists(rdkit_ligand_fp):
+        return [heterograph_fp], [rdkit_ligand_fp]
+    if not os.path.exists(os.path.join(self.pdbbind_dir, name)) and ligand is None:
+        print("Folder not found", name)
+        return [], []
+
+    try:
+
+        lig = read_mol(self.pdbbind_dir, name, suffix=self.ligand_file, remove_hs=False)
+        if self.max_lig_size != None and lig.GetNumHeavyAtoms() > self.max_lig_size:
+            print(f'Ligand with {lig.GetNumHeavyAtoms()} heavy atoms is larger than max_lig_size {self.max_lig_size}. Not including {name} in preprocessed data.')
             return [], []
 
-        try:
+        complex_graph = HeteroData()
+        complex_graph['name'] = name
+        get_lig_graph_with_matching(lig, complex_graph, self.popsize, self.maxiter, self.matching, self.keep_original,
+                                    self.num_conformers, remove_hs=self.remove_hs, tries=self.matching_tries)
 
-            lig = read_mol(self.pdbbind_dir, name, suffix=self.ligand_file, remove_hs=False)
-            if self.max_lig_size != None and lig.GetNumHeavyAtoms() > self.max_lig_size:
-                print(f'Ligand with {lig.GetNumHeavyAtoms()} heavy atoms is larger than max_lig_size {self.max_lig_size}. Not including {name} in preprocessed data.')
-                return [], []
+        moad_extract_receptor_structure(path=os.path.join(self.pdbbind_dir, name, f'{name}_{self.protein_file}.pdb'),
+                                        complex_graph=complex_graph,
+                                        neighbor_cutoff=self.receptor_radius,
+                                        max_neighbors=self.c_alpha_max_neighbors,
+                                        lm_embeddings=lm_embedding_chains,
+                                        knn_only_graph=self.knn_only_graph,
+                                        all_atoms=self.all_atoms,
+                                        atom_cutoff=self.atom_radius,
+                                        atom_max_neighbors=self.atom_max_neighbors)
 
-            complex_graph = HeteroData()
-            complex_graph['name'] = name
-            get_lig_graph_with_matching(lig, complex_graph, self.popsize, self.maxiter, self.matching, self.keep_original,
-                                        self.num_conformers, remove_hs=self.remove_hs, tries=self.matching_tries)
+    except Exception as e:
+        print(f'Skipping {name} because of the error:')
+        print(e)
+        return [], []
 
-            moad_extract_receptor_structure(path=os.path.join(self.pdbbind_dir, name, f'{name}_{self.protein_file}.pdb'),
-                                            complex_graph=complex_graph,
-                                            neighbor_cutoff=self.receptor_radius,
-                                            max_neighbors=self.c_alpha_max_neighbors,
-                                            lm_embeddings=lm_embedding_chains,
-                                            knn_only_graph=self.knn_only_graph,
-                                            all_atoms=self.all_atoms,
-                                            atom_cutoff=self.atom_radius,
-                                            atom_max_neighbors=self.atom_max_neighbors)
+    if self.dataset == 'posebusters':
+        other_positions = []
+        all_mol_file = os.path.join(self.pdbbind_dir, name, f'{name}_ligands.sdf')
+        supplier = Chem.SDMolSupplier(all_mol_file, sanitize=False, removeHs=False)
+        for mol in supplier:
+            Chem.SanitizeMol(mol)
+            all_mol = RemoveAllHs(mol)
+            for conf in all_mol.GetConformers():
+                other_positions.append(conf.GetPositions())
 
-        except Exception as e:
-            print(f'Skipping {name} because of the error:')
-            print(e)
-            return [], []
+        print(f'Found {len(other_positions)} alternative poses for {name}')
+        complex_graph['ligand'].orig_pos = np.asarray(other_positions)
 
-        if self.dataset == 'posebusters':
-            other_positions = []
-            all_mol_file = os.path.join(self.pdbbind_dir, name, f'{name}_ligands.sdf')
-            supplier = Chem.SDMolSupplier(all_mol_file, sanitize=False, removeHs=False)
-            for mol in supplier:
-                Chem.SanitizeMol(mol)
-                all_mol = RemoveAllHs(mol)
-                for conf in all_mol.GetConformers():
-                    other_positions.append(conf.GetPositions())
+    protein_center = torch.mean(complex_graph['receptor'].pos, dim=0, keepdim=True)
+    complex_graph['receptor'].pos -= protein_center
+    if self.all_atoms:
+        complex_graph['atom'].pos -= protein_center
 
-            print(f'Found {len(other_positions)} alternative poses for {name}')
-            complex_graph['ligand'].orig_pos = np.asarray(other_positions)
+    if (not self.matching) or self.num_conformers == 1:
+        complex_graph['ligand'].pos -= protein_center
+    else:
+        for p in complex_graph['ligand'].pos:
+            p -= protein_center
 
-        protein_center = torch.mean(complex_graph['receptor'].pos, dim=0, keepdim=True)
-        complex_graph['receptor'].pos -= protein_center
-        if self.all_atoms:
-            complex_graph['atom'].pos -= protein_center
+    complex_graph.original_center = protein_center
+    complex_graph['receptor_name'] = name
 
-        if (not self.matching) or self.num_conformers == 1:
-            complex_graph['ligand'].pos -= protein_center
-        else:
-            for p in complex_graph['ligand'].pos:
-                p -= protein_center
+    with open(heterograph_fp, "wb") as f:
+        pickle.dump([complex_graph], f)
+    with open(rdkit_ligand_fp, "wb") as f:
+        pickle.dump([lig], f)
 
-        complex_graph.original_center = protein_center
-        complex_graph['receptor_name'] = name
-        return [complex_graph], [lig]
+    return [heterograph_fp], [rdkit_ligand_fp]
 
 
 def print_statistics(complex_graphs):
