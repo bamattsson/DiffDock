@@ -451,9 +451,9 @@ class PDBBind(Dataset):
             p = ctx.Pool(self.num_workers)
             p.__enter__()
             original_torch_mp_sharing_strategy = torch.multiprocessing.get_sharing_strategy()
-            if "file_descriptor" in torch.multiprocessing.get_all_sharing_strategies():
+            if "file_system" in torch.multiprocessing.get_all_sharing_strategies():
                 print("setting sharing strategy to file_descriptor")
-                torch.multiprocessing.set_sharing_strategy("file_descriptor")
+                torch.multiprocessing.set_sharing_strategy("file_system")
         subset_of_self = get_namespace_with_needed_attributes(self)
         with tqdm(
             total=len(sample_names_remaining),
