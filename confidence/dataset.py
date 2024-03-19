@@ -123,13 +123,7 @@ class ConfidenceDataset(Dataset):
             pdbbind_dataset = PDBBind(
                 **conf_model_pdb_args,
             )
-            self.complex_graphs_cache = pdbbind_dataset.full_cache_path
-            del pdbbind_dataset
-
-        print(f'HAPPENING | Loading complex graphs from: {os.path.join(self.complex_graphs_cache, "heterographs.pkl")}')
-        with open(os.path.join(self.complex_graphs_cache, "heterographs.pkl"), 'rb') as f:
-            complex_graphs = pickle.load(f)
-        self.complex_graph_dict = {d.name: d for d in complex_graphs}
+            self.pdbbind_dataset = pdbbind_dataset
 
         if self.cache_ids_to_combine is None:
             print(f'HAPPENING | Loading positions and rmsds from: {os.path.join(self.full_cache_path, "ligand_positions.pkl")}')
@@ -174,22 +168,32 @@ class ConfidenceDataset(Dataset):
             for positions_tuple in list(zip(*all_rmsds)):
                 self.rmsds.append(np.concatenate(positions_tuple, axis=0))
             generated_rmsd_complex_names = names_order
-        print('Number of complex graphs: ', len(self.complex_graph_dict))
+        print('Number of complex graphs: ', self.pdbbind_dataset.len())
         print('Number of RMSDs and positions for the complex graphs: ', len(self.full_ligand_positions))
 
         self.all_samples_per_complex = samples_per_complex * (1 if self.cache_ids_to_combine is None else len(self.cache_ids_to_combine))
 
+        print(f'HAPPENING | Creating complex name to dataset id map')
+        self.complex_name_to_id_dict = {}
+        for id_ in range(pdbbind_dataset.len()):
+            complex = pdbbind_dataset.get(id_)
+            self.complex_name_to_id_dict[complex.name] = id_
+
         self.positions_rmsds_dict = {name: (pos, rmsd) for name, pos, rmsd in zip (generated_rmsd_complex_names, self.full_ligand_positions, self.rmsds)}
-        self.dataset_names = list(set(self.positions_rmsds_dict.keys()) & set(self.complex_graph_dict.keys()))
+        self.dataset_names = list(set(self.positions_rmsds_dict.keys()) & set(self.complex_name_to_id_dict.keys()))
         if limit_complexes > 0:
             self.dataset_names = self.dataset_names[:limit_complexes]
 
     def len(self):
-        return len(self.dataset_names)
+        # TMP when overfitting
+        return len(self.dataset_names) * self.all_samples_per_complex
+        # return len(self.dataset_names)
 
     def get(self, idx):
-        complex_graph = copy.deepcopy(self.complex_graph_dict[self.dataset_names[idx]])
-        positions, rmsds = self.positions_rmsds_dict[self.dataset_names[idx]]
+        complex_name = self.dataset_names[idx]
+        pdbbind_dataset_id = self.complex_name_to_id_dict[complex_name]
+        complex_graph = copy.deepcopy(self.pdbbind_dataset.get(pdbbind_dataset_id))
+        positions, rmsds = self.positions_rmsds_dict[complex_name]
 
         # Filtering out nan rmsds
         keep_idx = np.isfinite(rmsds)

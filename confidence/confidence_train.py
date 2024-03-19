@@ -1,6 +1,7 @@
 import gc
 import math
 import os
+import datetime
 
 import shutil
 
@@ -104,6 +105,12 @@ if cfg_fp:
     args.config = cfg_fp.name
 assert(args.main_metric_goal == 'max' or args.main_metric_goal == 'min')
 
+if args.wandb:
+    import wandb
+
+if args.tensorboard:
+    from torch.utils.tensorboard.writer import SummaryWriter
+
 def train_epoch(model, loader, optimizer, rmsd_prediction):
     model.train()
     meter = AverageMeter(['confidence_loss'])
@@ -161,10 +168,15 @@ def test_epoch(model, loader, rmsd_prediction):
                 if isinstance(args.rmsd_classification_cutoff, list):
                     labels = torch.cat([graph.y_binned for graph in data]).to(device) if isinstance(data,list) else data.y_binned
                     confidence_loss = F.cross_entropy(pred, labels)
+                    pred_proba = F.softmax(pred, dim=1)
+                    accuracy = torch.mean(
+                        (labels[:, 0] == (pred_proba[:, 0] > 0.5).float()).float()
+                    )
                 else:
                     labels = torch.cat([graph.y for graph in data]).to(device) if isinstance(data, list) else data.y
                     confidence_loss = F.binary_cross_entropy_with_logits(pred, labels)
-                    accuracy = torch.mean((labels == (pred > 0).float()).float())
+                    # TODO: the following accuracy calculation is wrong
+                    # accuracy = torch.mean((labels == (pred > 0).float()).float())
                 try:
                     roc_auc = roc_auc_score(labels.detach().cpu().numpy(), pred.detach().cpu().numpy())
                 except ValueError as e:
@@ -190,6 +202,8 @@ def test_epoch(model, loader, rmsd_prediction):
 
     if rmsd_prediction:
         baseline_metric = ((all_labels - all_labels.mean()).abs()).mean()
+    elif isinstance(args.rmsd_classification_cutoff, list):
+        baseline_metric = all_labels[:, 0].sum() / len(all_labels[:, 0])
     else:
         baseline_metric = all_labels.sum() / len(all_labels)
     results = meter.summary()
@@ -197,7 +211,16 @@ def test_epoch(model, loader, rmsd_prediction):
     return meter.summary(), baseline_metric
 
 
-def train(args, model, optimizer, scheduler, train_loader, val_loader, run_dir):
+def train(
+        args,
+        model,
+        optimizer,
+        scheduler,
+        train_loader,
+        val_loader,
+        run_dir,
+        tensorboard_writer=None,
+    ):
     best_val_metric = math.inf if args.main_metric_goal == 'min' else 0
     best_epoch = 0
 
@@ -214,12 +237,26 @@ def train(args, model, optimizer, scheduler, train_loader, val_loader, run_dir):
             print("Epoch {}: Validation loss {:.4f}  accuracy {:.4f}".format(epoch, val_metrics['confidence_loss'], val_metrics['accuracy']))
 
         if args.wandb:
-            import wandb
             logs.update({'valinf_' + k: v for k, v in val_metrics.items()}, step=epoch + 1)
             logs.update({'train_' + k: v for k, v in train_metrics.items()}, step=epoch + 1)
             logs.update({'mean_rmsd' if args.rmsd_prediction else 'fraction_positives': baseline_metric,
                          'current_lr': optimizer.param_groups[0]['lr']})
             wandb.log(logs, step=epoch + 1)
+        if args.tensorboard:
+            for k, v in val_metrics.items():
+                tensorboard_writer.add_scalar(f"{k}/val", v, epoch + 1)
+            for k, v in train_metrics.items():
+                tensorboard_writer.add_scalar(f"{k}/train", v, epoch + 1)
+            tensorboard_writer.add_scalar(
+                'mean_rmsd' if args.rmsd_prediction else 'fraction_positives',
+                baseline_metric,
+                epoch + 1
+            )
+            tensorboard_writer.add_scalar(
+                'current_lr',
+                optimizer.param_groups[0]['lr'],
+                epoch + 1
+            )
 
         if scheduler:
             scheduler.step(val_metrics[args.main_metric])
@@ -284,8 +321,14 @@ def construct_loader_confidence(args, device):
 
 if __name__ == '__main__':
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    print(f"Device found: {device}")
     with open(f'{args.original_model_dir}/model_parameters.yml') as f:
         score_model_args = Namespace(**yaml.full_load(f))
+
+    if args.run_name is None:
+        args.run_name = datetime.datetime.now().strftime("%Y-%m-%dT%H%M%S")
+    run_dir = os.path.join(args.log_dir, args.run_name)
+    print(f"Run output will be stored in {run_dir}")
 
     # construct loader
     train_loader, val_loader = construct_loader_confidence(args, device)
@@ -319,10 +362,14 @@ if __name__ == '__main__':
         )
         wandb.log({'numel': numel})
 
+    if args.tensorboard:
+        writer = SummaryWriter(run_dir)
+    else:
+        writer=None
+
     # record parameters
-    run_dir = os.path.join(args.log_dir, args.run_name)
     yaml_file_name = os.path.join(run_dir, 'model_parameters.yml')
     save_yaml_file(yaml_file_name, args.__dict__)
     args.device = device
 
-    train(args, model, optimizer, scheduler, train_loader, val_loader, run_dir)
+    train(args, model, optimizer, scheduler, train_loader, val_loader, run_dir, writer)
