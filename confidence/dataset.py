@@ -1,6 +1,6 @@
-import itertools
 import math
 import os
+import traceback
 import pickle
 import random
 from argparse import Namespace
@@ -55,6 +55,7 @@ def get_args_and_cache_path(original_model_dir, split):
 
 
 class ConfidenceDataset(Dataset):
+    PREPROCESSING_ERRORS_FP = "conf_dataset_errors.txt"
     def __init__(self, cache_path, original_model_dir, split, device, limit_complexes,
                  inference_steps, samples_per_complex, all_atoms,
                  args, model_ckpt, balance=False, use_original_model_cache=True, rmsd_classification_cutoff=2,
@@ -81,7 +82,7 @@ class ConfidenceDataset(Dataset):
         self.full_cache_path = os.path.join(cache_path, f'model_{os.path.splitext(os.path.basename(original_model_dir))[0]}'
                                             f'_split_{split}_limit_{limit_complexes}')
 
-        print(f'Loading or recreating original model graph')
+        print(f'Loading or recreating original model heterographs')
         original_model_pdb_args = model_conf_to_pdb_args(
             self.original_model_args,
             split_path=self.original_model_args.split_val if split == 'val' else self.original_model_args.split_train,
@@ -90,11 +91,9 @@ class ConfidenceDataset(Dataset):
             transform=None,
             num_workers=1,
         )
-        pdbbind_dataset = PDBBind(
+        original_model_pdbbind_dataset = PDBBind(
             **original_model_pdb_args,
         )
-        original_model_cache = pdbbind_dataset.full_cache_path
-        del pdbbind_dataset
 
         if (
             (not os.path.exists(os.path.join(self.full_cache_path, "ligand_positions.pkl"))
@@ -104,12 +103,12 @@ class ConfidenceDataset(Dataset):
                  )
         ):
             os.makedirs(self.full_cache_path, exist_ok=True)
-            self.preprocessing(original_model_cache)
+            self.preprocessing(original_model_pdbbind_dataset)
 
         # load the graphs that the confidence model will use
         if self.use_original_model_cache:
             print('Using the cached complex graphs of the original model args')
-            self.complex_graphs_cache = original_model_cache
+            self.complex_graphs_cache = original_model_pdbbind_dataset.full_cache_path
             print(self.complex_graphs_cache)
         else:
             print('Not using the cached complex graphs of the original model args. Instead the complex graphs are used that are at the location given by the dataset parameters given to confidence_train.py')
@@ -144,9 +143,10 @@ class ConfidenceDataset(Dataset):
                       ' does not exist. \n => We assume that means that we are using a ligand_positions.pkl where the '
                       'code was not saving the complex names for them yet. We now instead use the complex names of '
                       'the dataset that the original model used to create the ligand positions and RMSDs.')
-                with open(os.path.join(original_model_cache, "heterographs.pkl"), 'rb') as f:
-                    original_model_complex_graphs = pickle.load(f)
-                    generated_rmsd_complex_names = [d.name for d in original_model_complex_graphs]
+                num_complexes = original_model_pdbbind_dataset.len()
+                generated_rmsd_complex_names = [
+                    original_model_pdbbind_dataset.get(i) for i in range(num_complexes)
+                    ]
             assert (len(self.rmsds) == len(generated_rmsd_complex_names))
         else:
             all_rmsds_unsorted, all_full_ligand_positions_unsorted, all_names_unsorted = [], [], []
@@ -236,7 +236,10 @@ class ConfidenceDataset(Dataset):
         complex_graph.complex_t = {'tr': 0 * torch.ones(1), 'rot': 0 * torch.ones(1), 'tor': 0 * torch.ones(1)}
         return complex_graph
 
-    def preprocessing(self, original_model_cache):
+    def preprocessing(
+            self,
+            original_model_pdbbind_dataset: PDBBind,
+        ):
         t_to_sigma = partial(t_to_sigma_compl, args=self.original_model_args)
 
         model = get_model(self.original_model_args, self.device, t_to_sigma=t_to_sigma, no_parallel=True)
@@ -253,11 +256,14 @@ class ConfidenceDataset(Dataset):
         tor_schedule = tr_schedule
         print('common t schedule', tr_schedule)
 
-        print('HAPPENING | loading cached complexes of the original model to create the confidence dataset RMSDs and predicted positions. Doing that from: ', os.path.join(original_model_cache, "heterographs.pkl"))
-        with open(os.path.join(original_model_cache, "heterographs.pkl"), 'rb') as f:
-            complex_graphs = pickle.load(f)
-        dataset = ListDataset(complex_graphs)
-        loader = DataLoader(dataset=dataset, batch_size=1, shuffle=False)
+        print('HAPPENING | Creating DataLoader for old dataset')
+        # dataset = ListDataset(complex_graphs)
+        loader = DataLoader(
+            dataset=original_model_pdbbind_dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=2,
+        )
 
         cache_id_str = '' if self.cache_creation_id is None else '_id' + str(self.cache_creation_id)
         complex_results_cache_folder = os.path.join(
@@ -267,7 +273,10 @@ class ConfidenceDataset(Dataset):
         os.makedirs(complex_results_cache_folder, exist_ok=True)
         rmsds, full_ligand_positions, names = [], [], []
         start_batch_size = self.samples_per_complex
-        for idx, orig_complex_graph in tqdm(enumerate(loader)):
+        for orig_complex_graph in tqdm(
+            loader,
+            total=original_model_pdbbind_dataset.len()
+        ):
             assert(len(orig_complex_graph.name) == 1), "there should only be one name"
             name = orig_complex_graph.name[0]
             complex_pickle_fp = os.path.join(
@@ -280,7 +289,6 @@ class ConfidenceDataset(Dataset):
                 rmsds.append(rmsd)
                 full_ligand_positions.append(complex_full_ligand_positions)
                 names.append(name)
-                print(f"{name} found in cache, skipping.")
                 continue
 
             data_list = [copy.deepcopy(orig_complex_graph) for _ in range(self.samples_per_complex)]
@@ -289,6 +297,8 @@ class ConfidenceDataset(Dataset):
             predictions_list = None
             batch_size = start_batch_size
             failed_convergence_counter = 0
+            other_exception_counter = 0
+            use_start_ligand_position_as_data = False
             while predictions_list is None:
                 try:
                     predictions_list, confidences = sampling(
@@ -308,17 +318,33 @@ class ConfidenceDataset(Dataset):
                         failed_convergence_counter += 1
                         if failed_convergence_counter > 5:
                             print('| WARNING: SVD failed to converge 5 times - skipping the complex')
+                            use_start_ligand_position_as_data = True
                             break
                         print('| WARNING: SVD failed to converge - trying again with a new sample')
                     elif 'CUDA out of memory.' in str(e):
-                        if batch_size <= 2:
-                            print('| WARNING: CUDA OOM with batch size of 2 - skipping the complex')
-                            break
                         batch_size = batch_size // 2
                         print(f'| WARNING: CUDA OOM - trying with batch_size of {batch_size}')
+                        if batch_size < 2:
+                            print('| WARNING: CUDA OOM if bs >1 - skipping the complex')
+                            use_start_ligand_position_as_data = True
+                            break
                     else:
-                        raise e
-            if failed_convergence_counter > 5: predictions_list = data_list
+                        other_exception_counter += 1
+                        if other_exception_counter > 5:
+                            print(f"| WARNING: exceptions 5 times - skipping the complex")
+                            use_start_ligand_position_as_data = True
+                            error_log_fp = os.path.join(
+                                self.full_cache_path,
+                                self.PREPROCESSING_ERRORS_FP
+                            )
+                            with open(error_log_fp, "at") as f:
+                                f.write(f"\n\nError when processing {name}\n")
+                                f.write(f"{str(e)}\n")
+                                f.write(f"{traceback.format_exc()}\n")
+                            break
+                        print(f"| WARNING: encountered exception {e} trying again.")
+            if use_start_ligand_position_as_data:
+                predictions_list = data_list
             if self.original_model_args.no_torsion:
                 orig_complex_graph['ligand'].orig_pos = (orig_complex_graph['ligand'].pos.cpu().numpy() + orig_complex_graph.original_center.cpu().numpy())
 
