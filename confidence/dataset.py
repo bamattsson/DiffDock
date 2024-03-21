@@ -185,9 +185,7 @@ class ConfidenceDataset(Dataset):
             self.dataset_names = self.dataset_names[:limit_complexes]
 
     def len(self):
-        # TMP when overfitting
-        return len(self.dataset_names) * self.all_samples_per_complex
-        # return len(self.dataset_names)
+        return len(self.dataset_names)
 
     def get(self, idx):
         complex_name = self.dataset_names[idx]

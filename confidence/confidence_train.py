@@ -111,14 +111,16 @@ if args.wandb:
 if args.tensorboard:
     from torch.utils.tensorboard.writer import SummaryWriter
 
-def train_epoch(model, loader, optimizer, rmsd_prediction):
+def train_epoch(model, loader, optimizer, rmsd_prediction, gradient_accumulation_steps = 1):
     model.train()
     meter = AverageMeter(['confidence_loss'])
+
+    accumulated_for = 0
+    optimizer.zero_grad()
 
     for data in tqdm(loader, total=len(loader)):
         if device.type == 'cuda' and len(data) % torch.cuda.device_count() == 1 or device.type == 'cpu' and data.num_graphs == 1:
             print("Skipping batch of size 1 since otherwise batchnorm would not work.")
-        optimizer.zero_grad()
         try:
             pred = model(data)
             pred = pred[0]
@@ -132,8 +134,19 @@ def train_epoch(model, loader, optimizer, rmsd_prediction):
                 else:
                     labels = torch.cat([graph.y for graph in data]).to(device) if isinstance(data, list) else data.y
                     confidence_loss = F.binary_cross_entropy_with_logits(pred, labels)
-            confidence_loss.backward()
-            optimizer.step()
+
+            if gradient_accumulation_steps == 0:
+                confidence_loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+            else:
+                grad_acc_confidence_loss = confidence_loss / gradient_accumulation_steps
+                grad_acc_confidence_loss.backward()
+                accumulated_for += 1
+                if accumulated_for >= gradient_accumulation_steps:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    accumulated_for = 0
             meter.add([confidence_loss.cpu().detach()])
         except RuntimeError as e:
             if 'out of memory' in str(e):
@@ -143,6 +156,8 @@ def train_epoch(model, loader, optimizer, rmsd_prediction):
                         del p.grad  # free some memory
                 torch.cuda.empty_cache()
                 gc.collect()
+                optimizer.zero_grad()
+                accumulated_for = 0
                 continue
             else:
                 raise e
@@ -219,6 +234,7 @@ def train(
         train_loader,
         val_loader,
         run_dir,
+        gradient_accumulation_steps,
         tensorboard_writer=None,
     ):
     best_val_metric = math.inf if args.main_metric_goal == 'min' else 0
@@ -227,7 +243,13 @@ def train(
     print("Starting training...")
     for epoch in range(args.n_epochs):
         logs = {}
-        train_metrics = train_epoch(model, train_loader, optimizer, args.rmsd_prediction)
+        train_metrics = train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            args.rmsd_prediction,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+        )
         print("Epoch {}: Training loss {:.4f}".format(epoch, train_metrics['confidence_loss']))
 
         val_metrics, baseline_metric = test_epoch(model, val_loader, args.rmsd_prediction)
@@ -279,7 +301,7 @@ def train(
             'optimizer': optimizer.state_dict(),
         }, os.path.join(run_dir, 'last_model.pt'))
 
-    print("Best Validation accuracy {} on Epoch {}".format(best_val_metric, best_epoch))
+    print("Best main_metric {} on Epoch {}".format(best_val_metric, best_epoch))
 
 
 def construct_loader_confidence(args, device):
@@ -372,4 +394,14 @@ if __name__ == '__main__':
     save_yaml_file(yaml_file_name, args.__dict__)
     args.device = device
 
-    train(args, model, optimizer, scheduler, train_loader, val_loader, run_dir, writer)
+    train(
+        args,
+        model,
+        optimizer,
+        scheduler,
+        train_loader,
+        val_loader,
+        run_dir,
+        args.gradient_accumulation_steps,
+        writer,
+    )
