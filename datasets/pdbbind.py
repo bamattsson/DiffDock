@@ -457,13 +457,13 @@ class PDBBind(Dataset):
         subset_of_self = get_namespace_with_needed_attributes(self)
         with tqdm(
             total=len(sample_names_remaining),
-            desc=f'Loading samples:') as pbar:
+            desc=f'Loading samples') as pbar:
             map_fn = p.imap_unordered if self.num_workers > 1 else map
             for t in map_fn(
                 process_and_save_complexes,
                 zip(
                     [subset_of_self] * len(sample_names_remaining),
-                    cache_names,
+                    sample_names_remaining,
                     protein_paths_remaining,
                     lm_embeddings_chains_remaining,
                     ligands_remaining,
