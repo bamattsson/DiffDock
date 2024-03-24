@@ -59,7 +59,9 @@ class ConfidenceDataset(Dataset):
     def __init__(self, cache_path, original_model_dir, split, device, limit_complexes,
                  inference_steps, samples_per_complex, all_atoms,
                  args, model_ckpt, balance=False, use_original_model_cache=True, rmsd_classification_cutoff=2,
-                 cache_ids_to_combine=None, cache_creation_id=None):
+                 cache_ids_to_combine=None, cache_creation_id=None,
+                 deterministic_sample=False
+            ):
 
         super(ConfidenceDataset, self).__init__()
 
@@ -75,6 +77,10 @@ class ConfidenceDataset(Dataset):
         self.cache_creation_id = cache_creation_id
         self.samples_per_complex = samples_per_complex
         self.model_ckpt = model_ckpt
+        self.deterministic_sample = deterministic_sample
+        assert not (
+            self.deterministic_sample and self.balance
+        ), "These parameters cannot be combined"
 
         self.original_model_args, _ = get_args_and_cache_path(original_model_dir, split)
 
@@ -217,7 +223,10 @@ class ConfidenceDataset(Dataset):
                     complex_graph['ligand'].pos = torch.from_numpy(lig_pos)
             complex_graph.y = torch.tensor(label).float()
         else:
-            sample = random.randint(0, num_samples - 1)
+            if not self.deterministic_sample:
+                sample = random.randint(0, num_samples - 1)
+            else:
+                sample = idx % num_samples
             complex_graph['ligand'].pos = torch.from_numpy(positions[sample])
             complex_graph.y = torch.tensor(rmsds[sample] < self.rmsd_classification_cutoff).float().unsqueeze(0)
             if isinstance(self.rmsd_classification_cutoff, list):

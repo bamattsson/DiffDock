@@ -2,6 +2,7 @@ import gc
 import math
 import os
 import datetime
+import time
 
 import shutil
 
@@ -116,6 +117,7 @@ def train_epoch(model, loader, optimizer, rmsd_prediction, gradient_accumulation
     meter = AverageMeter(['confidence_loss'])
 
     accumulated_for = 0
+    num_ooms = 0
     optimizer.zero_grad()
 
     for data in tqdm(loader, total=len(loader)):
@@ -158,11 +160,12 @@ def train_epoch(model, loader, optimizer, rmsd_prediction, gradient_accumulation
                 gc.collect()
                 optimizer.zero_grad()
                 accumulated_for = 0
+                num_ooms += 1
                 continue
             else:
                 raise e
 
-    return meter.summary()
+    return meter.summary(), num_ooms
 
 def test_epoch(model, loader, rmsd_prediction):
     model.eval()
@@ -243,7 +246,9 @@ def train(
     print("Starting training...")
     for epoch in range(args.n_epochs):
         logs = {}
-        train_metrics = train_epoch(
+        num_train_steps = len(train_loader)
+        start_time = time.time()
+        train_metrics, num_train_ooms = train_epoch(
             model,
             train_loader,
             optimizer,
@@ -253,6 +258,8 @@ def train(
         print("Epoch {}: Training loss {:.4f}".format(epoch, train_metrics['confidence_loss']))
 
         val_metrics, baseline_metric = test_epoch(model, val_loader, args.rmsd_prediction)
+        end_time = time.time()
+        hours_taken = (end_time - start_time) / 3600.0
         if args.rmsd_prediction:
             print("Epoch {}: Validation loss {:.4f}".format(epoch, val_metrics['confidence_loss']))
         else:
@@ -270,7 +277,7 @@ def train(
             for k, v in train_metrics.items():
                 tensorboard_writer.add_scalar(f"{k}/train", v, epoch + 1)
             tensorboard_writer.add_scalar(
-                'mean_rmsd' if args.rmsd_prediction else 'fraction_positives',
+                'mean_rmsd' if args.rmsd_prediction else 'run_metadata/fraction_positives',
                 baseline_metric,
                 epoch + 1
             )
@@ -278,6 +285,15 @@ def train(
                 'current_lr',
                 optimizer.param_groups[0]['lr'],
                 epoch + 1
+            )
+            tensorboard_writer.add_scalar(
+                'run_metadata/num_train_ooms', num_train_ooms, epoch + 1
+            )
+            tensorboard_writer.add_scalar(
+                'run_metadata/num_train_steps', num_train_steps, epoch + 1
+            )
+            tensorboard_writer.add_scalar(
+                'run_metadata/hours_per_epoch', hours_taken, epoch + 1
             )
 
         if scheduler:
@@ -334,7 +350,7 @@ def construct_loader_confidence(args, device):
             exception_flag = True
         else: raise e
 
-    val_dataset = ConfidenceDataset(split="val", args=args, **common_args)
+    val_dataset = ConfidenceDataset(split="val", args=args, deterministic_sample=True, **common_args)
     val_loader = loader_class(dataset=val_dataset, batch_size=args.batch_size, shuffle=True)
 
     if exception_flag: raise Exception('We encountered the exception during train dataset loading: ', e)
