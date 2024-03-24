@@ -3,6 +3,7 @@ import math
 import os
 import datetime
 import time
+import numpy as np
 
 import shutil
 
@@ -149,7 +150,11 @@ def train_epoch(model, loader, optimizer, rmsd_prediction, gradient_accumulation
                     optimizer.step()
                     optimizer.zero_grad()
                     accumulated_for = 0
-            meter.add([confidence_loss.cpu().detach()])
+            conf_loss_cpu = confidence_loss.cpu().detach()
+            if np.isfinite(conf_loss_cpu):
+                meter.add([conf_loss_cpu])
+            else:
+                print("| WARNING: training loss is not finite")
         except RuntimeError as e:
             if 'out of memory' in str(e):
                 print('| WARNING: ran out of memory, skipping batch')
@@ -202,7 +207,14 @@ def test_epoch(model, loader, rmsd_prediction):
                         roc_auc = 0
                     else:
                         raise e
-            meter.add([confidence_loss.cpu().detach(), accuracy.cpu().detach(), torch.tensor(roc_auc)])
+            conf_loss = confidence_loss.cpu().detach()
+            acc = accuracy.cpu().detach()
+            roc_tensor = torch.tensor(roc_auc)
+            roc_cpu = roc_tensor.cpu().detach()
+            if np.isfinite(conf_loss) and np.isfinite(acc) and np.isfinite(roc_cpu):
+                meter.add([conf_loss, acc, roc_tensor])
+            else:
+                print(f"| WARNING: something during test is not finite {conf_loss}, {acc}, {roc_cpu}")
             all_labels.append(labels)
 
         except RuntimeError as e:
@@ -341,7 +353,12 @@ def construct_loader_confidence(args, device):
     exception_flag = False
     try:
         train_dataset = ConfidenceDataset(split="train", args=args, **common_args)
-        train_loader = loader_class(dataset=train_dataset, batch_size=args.batch_size, shuffle=True)
+        train_loader = loader_class(
+            dataset=train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=4,
+        )
     except Exception as e:
         if 'The generated ligand positions with cache_id do not exist:' in str(e):
             print("HAPPENING | Encountered the following exception when loading the confidence train dataset:")
@@ -351,8 +368,12 @@ def construct_loader_confidence(args, device):
         else: raise e
 
     val_dataset = ConfidenceDataset(split="val", args=args, deterministic_sample=True, **common_args)
-    val_loader = loader_class(dataset=val_dataset, batch_size=args.batch_size, shuffle=True)
-
+    val_loader = loader_class(
+        dataset=val_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=2,
+    )
     if exception_flag: raise Exception('We encountered the exception during train dataset loading: ', e)
     return train_loader, val_loader
 
