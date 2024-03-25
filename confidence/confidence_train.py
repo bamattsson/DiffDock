@@ -113,7 +113,24 @@ if args.wandb:
 if args.tensorboard:
     from torch.utils.tensorboard.writer import SummaryWriter
 
-def train_epoch(model, loader, optimizer, rmsd_prediction, gradient_accumulation_steps = 1):
+def is_finite(
+        tensor: torch.Tensor
+    ) -> bool:
+    has_nan = torch.isnan(tensor).any().item()
+    has_inf = torch.isinf(tensor).any().item()
+    return not (has_nan or has_inf)
+
+
+def train_epoch(
+        device,
+        model,
+        loader,
+        optimizer,
+        rmsd_prediction,
+        gradient_accumulation_steps,
+        mixed_precision_training,
+        grad_scaler,
+    ):
     model.train()
     meter = AverageMeter(['confidence_loss'])
 
@@ -125,36 +142,43 @@ def train_epoch(model, loader, optimizer, rmsd_prediction, gradient_accumulation
         if device.type == 'cuda' and len(data) % torch.cuda.device_count() == 1 or device.type == 'cpu' and data.num_graphs == 1:
             print("Skipping batch of size 1 since otherwise batchnorm would not work.")
         try:
-            pred = model(data)
-            pred = pred[0]
-            if rmsd_prediction:
-                labels = torch.cat([graph.rmsd for graph in data]).to(device) if isinstance(data, list) else data.rmsd
-                confidence_loss = F.mse_loss(pred, labels)
-            else:
-                if isinstance(args.rmsd_classification_cutoff, list):
-                    labels = torch.cat([graph.y_binned for graph in data]).to(device) if isinstance(data, list) else data.y_binned
-                    confidence_loss = F.cross_entropy(pred, labels)
+            with torch.autocast(device_type=device.type, enabled=mixed_precision_training):
+                pred = model(data)
+                pred = pred[0]
+                if rmsd_prediction:
+                    labels = torch.cat([graph.rmsd for graph in data]).to(device) if isinstance(data, list) else data.rmsd
+                    confidence_loss = F.mse_loss(pred, labels)
                 else:
-                    labels = torch.cat([graph.y for graph in data]).to(device) if isinstance(data, list) else data.y
-                    confidence_loss = F.binary_cross_entropy_with_logits(pred, labels)
+                    if isinstance(args.rmsd_classification_cutoff, list):
+                        labels = torch.cat([graph.y_binned for graph in data]).to(device) if isinstance(data, list) else data.y_binned
+                        confidence_loss = F.cross_entropy(pred, labels)
+                    else:
+                        labels = torch.cat([graph.y for graph in data]).to(device) if isinstance(data, list) else data.y
+                        confidence_loss = F.binary_cross_entropy_with_logits(pred, labels)
 
             if gradient_accumulation_steps == 0:
-                confidence_loss.backward()
-                optimizer.step()
+                grad_scaler.scale(confidence_loss).backward()
+                grad_scaler.step(optimizer)
+                grad_scaler.update()
                 optimizer.zero_grad()
             else:
-                grad_acc_confidence_loss = confidence_loss / gradient_accumulation_steps
-                grad_acc_confidence_loss.backward()
+                with torch.autocast(device_type=device.type, enabled=mixed_precision_training):
+                    grad_acc_confidence_loss = confidence_loss / gradient_accumulation_steps
+                grad_scaler.scale(grad_acc_confidence_loss).backward()
                 accumulated_for += 1
                 if accumulated_for >= gradient_accumulation_steps:
-                    optimizer.step()
+                    grad_scaler.step(optimizer)
+                    grad_scaler.update()
                     optimizer.zero_grad()
                     accumulated_for = 0
             conf_loss_cpu = confidence_loss.cpu().detach()
-            if np.isfinite(conf_loss_cpu):
+            if is_finite(conf_loss_cpu):
                 meter.add([conf_loss_cpu])
             else:
                 print("| WARNING: training loss is not finite")
+                print("pred", pred)
+                print("labels", labels)
+                print("confidence_loss", confidence_loss)
         except RuntimeError as e:
             if 'out of memory' in str(e):
                 print('| WARNING: ran out of memory, skipping batch')
@@ -172,49 +196,66 @@ def train_epoch(model, loader, optimizer, rmsd_prediction, gradient_accumulation
 
     return meter.summary(), num_ooms
 
-def test_epoch(model, loader, rmsd_prediction):
+def test_epoch(
+        device,
+        model,
+        loader,
+        rmsd_prediction,
+        mixed_precision_training,
+    ):
     model.eval()
     meter = AverageMeter(['loss'], unpooled_metrics=True) if rmsd_prediction else AverageMeter(['confidence_loss', 'accuracy', 'ROC AUC'], unpooled_metrics=True)
     all_labels = []
     for data in tqdm(loader, total=len(loader)):
         try:
-            with torch.no_grad():
-                pred = model(data)
-                pred = pred[0]
-            affinity_loss = torch.tensor(0.0, dtype=torch.float, device=pred[0].device)
-            accuracy = torch.tensor(0.0, dtype=torch.float, device=pred[0].device)
+            with torch.autocast(device_type=device.type, enabled=mixed_precision_training):
+                with torch.no_grad():
+                    pred = model(data)
+                    pred = pred[0]
+                affinity_loss = torch.tensor(0.0, dtype=torch.float, device=pred[0].device)
+                accuracy = torch.tensor(0.0, dtype=torch.float, device=pred[0].device)
+                if rmsd_prediction:
+                    labels = torch.cat([graph.rmsd for graph in data]).to(device) if isinstance(data, list) else data.rmsd
+                    confidence_loss = F.mse_loss(pred, labels)
+                else:
+                    if isinstance(args.rmsd_classification_cutoff, list):
+                        labels = torch.cat([graph.y_binned for graph in data]).to(device) if isinstance(data,list) else data.y_binned
+                        confidence_loss = F.cross_entropy(pred, labels)
+                        pred_proba = F.softmax(pred, dim=1)
+                        accuracy = torch.mean(
+                            (labels[:, 0] == (pred_proba[:, 0] > 0.5).float()).float()
+                        )
+                    else:
+                        labels = torch.cat([graph.y for graph in data]).to(device) if isinstance(data, list) else data.y
+                        confidence_loss = F.binary_cross_entropy_with_logits(pred, labels)
+                        # TODO: the following accuracy calculation is wrong
+                        # accuracy = torch.mean((labels == (pred > 0).float()).float())
+                    try:
+                        labels_cpu = labels.detach().cpu()
+                        pred_cpu = pred.detach().cpu()
+                        if is_finite(labels_cpu) and is_finite(pred_cpu):
+                            roc_auc = torch.tensor(roc_auc_score(labels_cpu.numpy(), pred_cpu.numpy()))
+                        else:
+                            roc_auc = torch.nan
+                    except ValueError as e:
+                        if 'Only one class present in y_true. ROC AUC score is not defined in that case.' in str(e):
+                            roc_auc = torch.tensor(0)
+                        else:
+                            raise e
             if rmsd_prediction:
-                labels = torch.cat([graph.rmsd for graph in data]).to(device) if isinstance(data, list) else data.rmsd
-                confidence_loss = F.mse_loss(pred, labels)
                 meter.add([confidence_loss.cpu().detach()])
             else:
-                if isinstance(args.rmsd_classification_cutoff, list):
-                    labels = torch.cat([graph.y_binned for graph in data]).to(device) if isinstance(data,list) else data.y_binned
-                    confidence_loss = F.cross_entropy(pred, labels)
-                    pred_proba = F.softmax(pred, dim=1)
-                    accuracy = torch.mean(
-                        (labels[:, 0] == (pred_proba[:, 0] > 0.5).float()).float()
-                    )
+                conf_loss = confidence_loss.cpu().detach()
+                acc = accuracy.cpu().detach()
+                if is_finite(conf_loss) and is_finite(acc) and is_finite(roc_auc):
+                    meter.add([conf_loss, acc, roc_auc])
                 else:
-                    labels = torch.cat([graph.y for graph in data]).to(device) if isinstance(data, list) else data.y
-                    confidence_loss = F.binary_cross_entropy_with_logits(pred, labels)
-                    # TODO: the following accuracy calculation is wrong
-                    # accuracy = torch.mean((labels == (pred > 0).float()).float())
-                try:
-                    roc_auc = roc_auc_score(labels.detach().cpu().numpy(), pred.detach().cpu().numpy())
-                except ValueError as e:
-                    if 'Only one class present in y_true. ROC AUC score is not defined in that case.' in str(e):
-                        roc_auc = 0
-                    else:
-                        raise e
-            conf_loss = confidence_loss.cpu().detach()
-            acc = accuracy.cpu().detach()
-            roc_tensor = torch.tensor(roc_auc)
-            roc_cpu = roc_tensor.cpu().detach()
-            if np.isfinite(conf_loss) and np.isfinite(acc) and np.isfinite(roc_cpu):
-                meter.add([conf_loss, acc, roc_tensor])
-            else:
-                print(f"| WARNING: something during test is not finite {conf_loss}, {acc}, {roc_cpu}")
+                    print(f"| WARNING: something during test logging is not finite")
+                    print("pred", pred)
+                    print("labels", labels)
+                    print("conf_loss", confidence_loss)
+                    print("acc", acc)
+                    print("roc_auc", roc_auc)
             all_labels.append(labels)
 
         except RuntimeError as e:
@@ -243,13 +284,16 @@ def test_epoch(model, loader, rmsd_prediction):
 
 def train(
         args,
+        device,
         model,
         optimizer,
         scheduler,
+        grad_scaler,
         train_loader,
         val_loader,
         run_dir,
         gradient_accumulation_steps,
+        mixed_precision_training,
         tensorboard_writer=None,
     ):
     best_val_metric = math.inf if args.main_metric_goal == 'min' else 0
@@ -261,15 +305,24 @@ def train(
         num_train_steps = len(train_loader)
         start_time = time.time()
         train_metrics, num_train_ooms = train_epoch(
+            device,
             model,
             train_loader,
             optimizer,
             args.rmsd_prediction,
             gradient_accumulation_steps=gradient_accumulation_steps,
+            mixed_precision_training=mixed_precision_training,
+            grad_scaler=grad_scaler,
         )
         print("Epoch {}: Training loss {:.4f}".format(epoch, train_metrics['confidence_loss']))
 
-        val_metrics, baseline_metric = test_epoch(model, val_loader, args.rmsd_prediction)
+        val_metrics, baseline_metric = test_epoch(
+            device,
+            model,
+            val_loader,
+            args.rmsd_prediction,
+            mixed_precision_training
+        )
         end_time = time.time()
         hours_taken = (end_time - start_time) / 3600.0
         if args.rmsd_prediction:
@@ -327,6 +380,7 @@ def train(
             'epoch': epoch,
             'model': state_dict,
             'optimizer': optimizer.state_dict(),
+            'scaler': grad_scaler.state_dict(),
         }, os.path.join(run_dir, 'last_model.pt'))
 
     print("Best main_metric {} on Epoch {}".format(best_val_metric, best_epoch))
@@ -393,6 +447,9 @@ if __name__ == '__main__':
     train_loader, val_loader = construct_loader_confidence(args, device)
     model = get_model(score_model_args if args.transfer_weights else args, device, t_to_sigma=None, confidence_mode=True)
     optimizer, scheduler = get_optimizer_and_scheduler(args, model, scheduler_mode=args.main_metric_goal)
+    if args.mixed_precision_training:
+        print("Training with mixed precision")
+    grad_scaler = torch.cuda.amp.GradScaler(enabled=args.mixed_precision_training)
 
     if args.transfer_weights:
         print("HAPPENING | Transferring weights from original_model_dir to the new model after using original_model_dir's arguments to construct the new model.")
@@ -403,10 +460,12 @@ if __name__ == '__main__':
         model.load_state_dict(model_state_dict)
 
     elif args.restart_dir:
-        dict = torch.load(f'{args.restart_dir}/last_model.pt', map_location=torch.device('cpu'))
-        model.module.load_state_dict(dict['model'], strict=True)
-        optimizer.load_state_dict(dict['optimizer'])
-        print("Restarting from epoch", dict['epoch'])
+        dict_ = torch.load(f'{args.restart_dir}/last_model.pt', map_location=torch.device('cpu'))
+        model.module.load_state_dict(dict_['model'], strict=True)
+        optimizer.load_state_dict(dict_['optimizer'])
+        if 'scaler' in dict_:
+            grad_scaler.load_state_dict(dict_['scaler'])
+        print("Restarting from epoch", dict_['epoch'])
 
     numel = sum([p.numel() for p in model.parameters()])
     print('Model with', numel, 'parameters')
@@ -433,12 +492,15 @@ if __name__ == '__main__':
 
     train(
         args,
+        device,
         model,
         optimizer,
         scheduler,
+        grad_scaler,
         train_loader,
         val_loader,
         run_dir,
         args.gradient_accumulation_steps,
+        args.mixed_precision_training,
         writer,
     )
