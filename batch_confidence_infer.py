@@ -217,7 +217,6 @@ def main(
                 
                 success = 1
             except Exception as e:
-                raise e
                 print("Failed on", complex_name, e)
                 print(traceback.format_exc())
                 success -= 1
