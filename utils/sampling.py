@@ -229,6 +229,41 @@ def sampling(data_list, model, inference_steps, tr_schedule, rot_schedule, tor_s
     return data_list, confidence
 
 
+def compute_confidence(
+        confidence_data_list,
+        batch_size,
+        device,
+        confidence_model,
+        confidence_model_args,
+    ):
+
+    confidence_loader = DataLoader(confidence_data_list, batch_size=batch_size)
+    confidence = []
+
+    with torch.no_grad():
+        for confidence_complex_graph_batch in confidence_loader:
+            b = confidence_complex_graph_batch.num_graphs
+
+            if hasattr(confidence_model_args, 'crop_beyond') and confidence_model_args.crop_beyond is not None:
+                confidence_complex_graph_batch = confidence_complex_graph_batch.to_data_list()
+                for batch in confidence_complex_graph_batch:
+                    crop_beyond(batch, confidence_model_args.crop_beyond, confidence_model_args.all_atoms)
+                confidence_complex_graph_batch = Batch.from_data_list(confidence_complex_graph_batch)
+
+            confidence_complex_graph_batch = confidence_complex_graph_batch.to(device)
+            set_time(confidence_complex_graph_batch, 0, 0, 0, 0, b, confidence_model_args.all_atoms, device)
+            out = confidence_model(confidence_complex_graph_batch)
+
+            if type(out) is tuple:
+                out = out[0]
+            confidence.append(out)
+
+    confidence = torch.cat(confidence, dim=0)
+    confidence = torch.nan_to_num(confidence, nan=-1000)
+
+    return confidence
+
+
 def compute_affinity(data_list, affinity_model, affinity_data_list, device, parallel, all_atoms, include_miscellaneous_atoms):
 
     with torch.no_grad():
