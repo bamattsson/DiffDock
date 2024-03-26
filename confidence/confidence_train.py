@@ -142,7 +142,11 @@ def train_epoch(
         if device.type == 'cuda' and len(data) % torch.cuda.device_count() == 1 or device.type == 'cpu' and data.num_graphs == 1:
             print("Skipping batch of size 1 since otherwise batchnorm would not work.")
         try:
-            with torch.autocast(device_type=device.type, enabled=mixed_precision_training):
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.bfloat16,  # need bfloat16, not stable with float16
+                enabled=mixed_precision_training,
+                ):
                 pred = model(data)
                 pred = pred[0]
                 if rmsd_prediction:
@@ -208,7 +212,11 @@ def test_epoch(
     all_labels = []
     for data in tqdm(loader, total=len(loader)):
         try:
-            with torch.autocast(device_type=device.type, enabled=mixed_precision_training):
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.bfloat16,
+                enabled=mixed_precision_training,
+                ):
                 with torch.no_grad():
                     pred = model(data)
                     pred = pred[0]
@@ -231,8 +239,8 @@ def test_epoch(
                         # TODO: the following accuracy calculation is wrong
                         # accuracy = torch.mean((labels == (pred > 0).float()).float())
                     try:
-                        labels_cpu = labels.detach().cpu()
-                        pred_cpu = pred.detach().cpu()
+                        labels_cpu = labels.detach().to("cpu", torch.float32)
+                        pred_cpu = pred.detach().to("cpu", torch.float32)
                         if is_finite(labels_cpu) and is_finite(pred_cpu):
                             roc_auc = torch.tensor(roc_auc_score(labels_cpu.numpy(), pred_cpu.numpy()))
                         else:
@@ -449,7 +457,9 @@ if __name__ == '__main__':
     optimizer, scheduler = get_optimizer_and_scheduler(args, model, scheduler_mode=args.main_metric_goal)
     if args.mixed_precision_training:
         print("Training with mixed precision")
-    grad_scaler = torch.cuda.amp.GradScaler(enabled=args.mixed_precision_training)
+    grad_scaler = torch.cuda.amp.GradScaler(
+        enabled=False, # this needs to be True if float16 is used instead of bfloat16
+    )
 
     if args.transfer_weights:
         print("HAPPENING | Transferring weights from original_model_dir to the new model after using original_model_dir's arguments to construct the new model.")

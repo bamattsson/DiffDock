@@ -145,7 +145,7 @@ class AverageMeter():
 
     def summary(self):
         if self.intervals == 1:
-            if self.count >= 0:
+            if self.count > 0:
                 out = {k: v.item() / self.count for k, v in self.acc.items()}
             else:
                 out = {k: np.nan for k in self.acc.keys()}
@@ -154,7 +154,7 @@ class AverageMeter():
             out = {}
             for i in range(self.intervals):
                 for type_idx, k in enumerate(self.types):
-                    if self.count[type_idx][i] >= 0:
+                    if self.count[type_idx][i] > 0:
                         out['int' + str(i) + '_' + k] = (
                             list(self.acc.values())[type_idx][i] / self.count[type_idx][i]).item()
                     else:
