@@ -1,3 +1,4 @@
+import pathlib
 import numpy as np
 import tqdm
 import os
@@ -7,6 +8,7 @@ import os
     cached to memory, therefore the precomputation is only run the first time the repository is run on a machine
 """
 
+repo_root = pathlib.Path(__file__).parent.parent
 
 def p(x, sigma, N=10):
     p_ = 0
@@ -28,9 +30,9 @@ SIGMA_MIN, SIGMA_MAX, SIGMA_N = 3e-3, 2, 5000  # relative to pi
 x = 10 ** np.linspace(np.log10(X_MIN), 0, X_N + 1) * np.pi
 sigma = 10 ** np.linspace(np.log10(SIGMA_MIN), np.log10(SIGMA_MAX), SIGMA_N + 1) * np.pi
 
-if os.path.exists('.p.npy'):
-    p_ = np.load('.p.npy')
-    score_ = np.load('.score.npy')
+if os.path.exists(repo_root.joinpath('.p.npy')):
+    p_ = np.load(repo_root.joinpath('.p.npy'))
+    score_ = np.load(repo_root.joinpath('.score.npy'))
 else:
     p_ = p(x, sigma[:, None], N=100)
     np.save('.p.npy', p_)

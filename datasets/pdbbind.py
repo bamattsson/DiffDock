@@ -169,8 +169,8 @@ RDKIT_LIGAND_CACHE_SUBFOLDER = "rdkit_ligands_folder"
 
 class PDBBind(Dataset):
 
-    HETEROGRAPH_LIST_FP = "heterograph_fps.txt"
-    RDKIT_LIGAND_LIST_FP = "rdkit_ligand_fps.txt"
+    HETEROGRAPH_LIST_FP = "heterograph_relative_fps.txt"
+    RDKIT_LIGAND_LIST_FP = "rdkit_ligand_relative_fps.txt"
     def __init__(
             self,
             root,
@@ -284,12 +284,18 @@ class PDBBind(Dataset):
             ) as f:
                 self.rdkit_ligand_fps = f.read().split("\n")
 
-        print_statistics(self.complex_graph_fps)
+        print_statistics(self.complex_graph_fps, self.full_cache_path)
         list_names = []
         for complex_graph_fp in self.complex_graph_fps:
-            with open(complex_graph_fp, "rb") as f:
+            with open(
+                self.get_full_path(complex_graph_fp),
+                "rb"
+                ) as f:
                 list_names.append(pickle.load(f)[0]["name"])
-        list_name_txt_fp = os.path.join(self.full_cache_path, f'pdbbind_{os.path.splitext(os.path.basename(self.split_path))[0][:3]}_names.txt')
+        list_name_txt_fp = os.path.join(
+            self.full_cache_path,
+            f'pdbbind_{os.path.splitext(os.path.basename(self.split_path))[0][:3]}_names.txt'
+        )
         if not os.path.exists(list_name_txt_fp):
             with open(list_name_txt_fp, 'w') as f:
                 f.write('\n'.join(list_names))
@@ -298,10 +304,16 @@ class PDBBind(Dataset):
         return len(self.complex_graph_fps)
 
     def get(self, idx):
-        with open(self.complex_graph_fps[idx], "rb") as f:
+        with open(
+            self.get_full_path(self.complex_graph_fps[idx]),
+            "rb"
+            ) as f:
             complex_graph = pickle.load(f)[0]
         if self.require_ligand:
-            with open(self.rdkit_ligand_fps[idx], "rb") as f:
+            with open(
+                self.get_full_path(self.rdkit_ligand_fps[idx]),
+                "rb"
+                ) as f:
                 mol = pickle.load(f)[0]
             complex_graph.mol = RemoveAllHs(mol)
 
@@ -430,8 +442,8 @@ class PDBBind(Dataset):
                 f"{cache_name}.pkl"
             )
             if os.path.exists(heterograph_fp) and os.path.exists(rdkit_ligand_fp):
-                complex_graph_fps.append(heterograph_fp)
-                rdkit_ligand_fps.append(rdkit_ligand_fp)
+                complex_graph_fps.append(self.get_relative_path(heterograph_fp))
+                rdkit_ligand_fps.append(self.get_relative_path(rdkit_ligand_fp))
             else:
                 sample_names_remaining.append(cache_name)
                 protein_paths_remaining.append(protein_path)
@@ -470,6 +482,17 @@ class PDBBind(Dataset):
                     ligand_descriptions_remaining,
                 ),
                 ):
+                complex_graph_fp_list = t[0]
+                rdkit_ligand_fp_list = t[1]
+                if len(complex_graph_fp_list) == 1:
+                    complex_graph_fp_list[0] = self.get_relative_path(
+                        complex_graph_fp_list[0]
+                        )
+                    rdkit_ligand_fp_list[0] = self.get_relative_path(
+                        rdkit_ligand_fp_list[0]
+                        )
+                elif len(complex_graph_fp_list) > 1:
+                    raise RuntimeError("This should not happen")
                 complex_graph_fps.extend(t[0])
                 rdkit_ligand_fps.extend(t[1])
                 pbar.update()
@@ -492,6 +515,12 @@ class PDBBind(Dataset):
         ), 'wt') as f:
             f.write("\n".join(self.rdkit_ligand_fps))
         print(f"Saved lists with all processed data points.")
+
+    def get_relative_path(self, full_path):
+        return os.path.relpath(full_path, self.full_cache_path)
+
+    def get_full_path(self, relative_path):
+        return os.path.join(self.full_cache_path, relative_path)
 
     def check_all_complexes(self):
         if os.path.exists(os.path.join(self.full_cache_path, self.HETEROGRAPH_LIST_FP)):
@@ -621,12 +650,15 @@ def process_and_save_complexes(
     return [heterograph_fp], [rdkit_ligand_fp]
 
 
-def print_statistics(complex_graph_fps):
+def print_statistics(complex_graph_fps, full_cache_path):
     statistics = ([], [], [], [], [], [])
     receptor_sizes = []
 
     for complex_graph_fp in tqdm(complex_graph_fps, "Calculating statistics"):
-        with open(complex_graph_fp, 'rb') as f:
+        with open(
+            os.path.join(full_cache_path, complex_graph_fp),
+            'rb'
+            ) as f:
             complex_graph = pickle.load(f)[0]
         lig_pos = complex_graph['ligand'].pos if torch.is_tensor(complex_graph['ligand'].pos) else complex_graph['ligand'].pos[0]
         receptor_sizes.append(complex_graph['receptor'].pos.shape[0])
