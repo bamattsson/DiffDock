@@ -129,7 +129,6 @@ def train_epoch(
         rmsd_prediction,
         gradient_accumulation_steps,
         mixed_precision_training,
-        grad_scaler,
     ):
     model.train()
     meter = AverageMeter(['confidence_loss'])
@@ -161,18 +160,16 @@ def train_epoch(
                         confidence_loss = F.binary_cross_entropy_with_logits(pred, labels)
 
             if gradient_accumulation_steps == 0:
-                grad_scaler.scale(confidence_loss).backward()
-                grad_scaler.step(optimizer)
-                grad_scaler.update()
+                confidence_loss.backward()
+                optimizer.step()
                 optimizer.zero_grad()
             else:
                 with torch.autocast(device_type=device.type, enabled=mixed_precision_training):
                     grad_acc_confidence_loss = confidence_loss / gradient_accumulation_steps
-                grad_scaler.scale(grad_acc_confidence_loss).backward()
+                grad_acc_confidence_loss.backward()
                 accumulated_for += 1
                 if accumulated_for >= gradient_accumulation_steps:
-                    grad_scaler.step(optimizer)
-                    grad_scaler.update()
+                    optimizer.step()
                     optimizer.zero_grad()
                     accumulated_for = 0
             conf_loss_cpu = confidence_loss.cpu().detach()
@@ -296,7 +293,6 @@ def train(
         model,
         optimizer,
         scheduler,
-        grad_scaler,
         train_loader,
         val_loader,
         run_dir,
@@ -320,7 +316,6 @@ def train(
             args.rmsd_prediction,
             gradient_accumulation_steps=gradient_accumulation_steps,
             mixed_precision_training=mixed_precision_training,
-            grad_scaler=grad_scaler,
         )
         print("Epoch {}: Training loss {:.4f}".format(epoch, train_metrics['confidence_loss']))
 
@@ -388,7 +383,6 @@ def train(
             'epoch': epoch,
             'model': state_dict,
             'optimizer': optimizer.state_dict(),
-            'scaler': grad_scaler.state_dict(),
         }, os.path.join(run_dir, 'last_model.pt'))
 
     print("Best main_metric {} on Epoch {}".format(best_val_metric, best_epoch))
@@ -457,9 +451,6 @@ if __name__ == '__main__':
     optimizer, scheduler = get_optimizer_and_scheduler(args, model, scheduler_mode=args.main_metric_goal)
     if args.mixed_precision_training:
         print("Training with mixed precision")
-    grad_scaler = torch.cuda.amp.GradScaler(
-        enabled=False, # this needs to be True if float16 is used instead of bfloat16
-    )
 
     if args.transfer_weights:
         print("HAPPENING | Transferring weights from original_model_dir to the new model after using original_model_dir's arguments to construct the new model.")
@@ -473,8 +464,6 @@ if __name__ == '__main__':
         dict_ = torch.load(f'{args.restart_dir}/last_model.pt', map_location=torch.device('cpu'))
         model.module.load_state_dict(dict_['model'], strict=True)
         optimizer.load_state_dict(dict_['optimizer'])
-        if 'scaler' in dict_:
-            grad_scaler.load_state_dict(dict_['scaler'])
         print("Restarting from epoch", dict_['epoch'])
 
     numel = sum([p.numel() for p in model.parameters()])
@@ -506,7 +495,6 @@ if __name__ == '__main__':
         model,
         optimizer,
         scheduler,
-        grad_scaler,
         train_loader,
         val_loader,
         run_dir,

@@ -241,6 +241,9 @@ if __name__ == '__main__':
         os.makedirs(visualization_dir)
 
     for idx, orig_complex_graph in tqdm(enumerate(test_loader)):
+        if args.limit_complexes > 0 and (idx >= args.limit_complexes):
+            print("Breaking as we are done analysing complexes")
+            break
         if "cuda" in str(device):
             torch.cuda.empty_cache()
 

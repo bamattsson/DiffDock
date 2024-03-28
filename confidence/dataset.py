@@ -189,6 +189,8 @@ class ConfidenceDataset(Dataset):
         self.dataset_names = list(set(self.positions_rmsds_dict.keys()) & set(self.complex_name_to_id_dict.keys()))
         if limit_complexes > 0:
             self.dataset_names = self.dataset_names[:limit_complexes]
+        if self.deterministic_sample:
+            self.dataset_names = sorted(self.dataset_names)
 
     def len(self):
         return len(self.dataset_names)

@@ -145,6 +145,8 @@ def main(
     state_dict = torch.load(
         f'{configs.confidence_model_dir}/{configs.confidence_ckpt}',
         map_location=torch.device('cpu'))
+    if "model" in state_dict:
+        state_dict = state_dict["model"]
     confidence_model.load_state_dict(state_dict, strict=True)
     # TODO: Need to add support for mixed precision models
     confidence_model = confidence_model.to(device)
