@@ -1,12 +1,15 @@
 import binascii
+import gc
 import glob
 import os
+from pathlib import Path
 import pickle
 from typing import Dict, Any
 from collections import defaultdict
 import random
 import copy
 import torch.nn.functional as F
+import pandas as pd
 import numpy as np
 import torch
 from rdkit import Chem
@@ -30,6 +33,8 @@ def model_conf_to_pdb_args(
         require_ligand=False,
         transform=None,
         num_workers=None,
+        force_regenerate=False,
+        csv_lines_to_process=None,
     ) -> Dict:
     """Get arguments to instantiate PDB."""
 
@@ -53,7 +58,8 @@ def model_conf_to_pdb_args(
         "root": model_conf_args.data_dir,
         "cache_path": model_conf_args.cache_path,
         "esm_embeddings_path": model_conf_args.esm_embeddings_path,
-        "num_workers": int(getattr(model_conf_args, "num_workers", 1))
+        "num_workers": int(getattr(model_conf_args, "num_workers", 1)),
+        "dataset": getattr(model_conf_args, "dataset", "PDBBind"),
     }
 
     all_args = {
@@ -62,6 +68,8 @@ def model_conf_to_pdb_args(
         "keep_original": keep_original,
         "transform": transform,
         "require_ligand": require_ligand,
+        "force_regenerate": force_regenerate,
+        "csv_lines_to_process": csv_lines_to_process,
     }
 
     if num_workers is not None:
@@ -202,7 +210,9 @@ class PDBBind(Dataset):
             ligand_file="ligand",
             knn_only_graph=False,
             matching_tries=1,
-            dataset='PDBBind'
+            dataset='PDBBind',
+            force_regenerate=False,
+            csv_lines_to_process=None,
         ):
 
         super(PDBBind, self).__init__(root, transform)
@@ -255,7 +265,8 @@ class PDBBind(Dataset):
         self.num_conformers = num_conformers
 
         self.atom_radius, self.atom_max_neighbors = atom_radius, atom_max_neighbors
-        if not self.check_all_complexes():
+        self.csv_lines_to_process = csv_lines_to_process
+        if force_regenerate or not self.check_all_complexes():
             os.makedirs(self.full_cache_path, exist_ok=True)
             os.makedirs(
                 os.path.join(self.full_cache_path, HETEROGRAPH_CACHE_SUBFOLDER),
@@ -265,10 +276,15 @@ class PDBBind(Dataset):
                 os.path.join(self.full_cache_path, RDKIT_LIGAND_CACHE_SUBFOLDER),
                 exist_ok=True
             )
-            if protein_path_list is None or ligand_descriptions is None:
-                self.preprocessing()
+            if self.dataset == "pla_data":
+                self.preprocess_pla_data()
+            elif self.dataset == "PDBBind":
+                if protein_path_list is None or ligand_descriptions is None:
+                    self.preprocessing()
+                else:
+                    self.inference_preprocessing()
             else:
-                self.inference_preprocessing()
+                raise ValueError(f"dataset={self.dataset} is not allowed")
         else:
             with open(os.path.join(
                 self.full_cache_path,
@@ -401,6 +417,56 @@ class PDBBind(Dataset):
             self.protein_path_list,
             self.ligand_descriptions,
             ligands_list,
+            lm_embeddings_chains_all,
+        )
+
+    def preprocess_pla_data(
+            self,
+    ):
+        complexes_df = pd.read_csv(self.pdbbind_dir, index_col=0, low_memory=False)
+
+        if self.csv_lines_to_process is not None:
+            complexes_df = complexes_df.iloc[:self.csv_lines_to_process].copy()
+
+        complex_names_all = complexes_df["pdb_id"].to_list()
+
+        if self.esm_embeddings_path is not None:
+            id_to_embeddings = torch.load(self.esm_embeddings_path)
+            chain_embeddings_dictlist = defaultdict(list)
+            chain_indices_dictlist = defaultdict(list)
+            for key, embedding in id_to_embeddings.items():
+                key_name = key.split('_chain_')[0]
+                if key_name in set(complex_names_all):
+                    chain_embeddings_dictlist[key_name].append(embedding)
+                    chain_indices_dictlist[key_name].append(int(key.split('_chain_')[1]))
+
+            lm_embeddings_chains_dict = {}
+            for name in set(complex_names_all):
+                complex_chains_embeddings = chain_embeddings_dictlist[name]
+                complex_chains_indices = chain_indices_dictlist[name]
+                chain_reorder_idx = np.argsort(complex_chains_indices)
+                reordered_chains = [complex_chains_embeddings[i] for i in chain_reorder_idx]
+                lm_embeddings_chains_dict[name] = reordered_chains
+
+            # Free up some memory (NB: it doesn't work, torch.load seems to have a leak)
+            del id_to_embeddings
+            del chain_embeddings_dictlist
+            del chain_indices_dictlist
+            gc.collect()
+
+            lm_embeddings_chains_all = []
+            for name in complex_names_all:
+                lm_embeddings_chains_all.append(lm_embeddings_chains_dict[name])
+        else:
+            print("WARN | esm_embeddings were not available, adding None instead")
+            lm_embeddings_chains_all = [None] * len(complex_names_all)
+
+
+        self.preprocess_all_remaining_complexes(
+            complexes_df["complex_id"].to_list(),
+            complexes_df["protein_pdb_fp"].to_list(),
+            [None] * len(complexes_df),
+            complexes_df["ligand_sdf_fp"].to_list(),
             lm_embeddings_chains_all,
         )
 
@@ -585,22 +651,31 @@ def process_and_save_complexes(
     if os.path.exists(heterograph_fp) and os.path.exists(rdkit_ligand_fp):
         return [heterograph_fp], [rdkit_ligand_fp]
     if not os.path.exists(os.path.join(self.pdbbind_dir, name)) and ligand is None:
-        print("Folder not found", name)
+        print("Folder not found", cache_name)
         return [], []
 
     try:
-
-        lig = read_mol(self.pdbbind_dir, name, suffix=self.ligand_file, remove_hs=False)
+        if ligand is not None:
+            if (not os.path.exists(ligand)) or Path(ligand).suffix != ".sdf":
+                print("Ligand not found for:", cache_name)
+                return [], []
+            lig = read_molecule(ligand, remove_hs=False, sanitize=True)
+        else:
+            lig = read_mol(self.pdbbind_dir, name, suffix=self.ligand_file, remove_hs=False)
         if self.max_lig_size != None and lig.GetNumHeavyAtoms() > self.max_lig_size:
             print(f'Ligand with {lig.GetNumHeavyAtoms()} heavy atoms is larger than max_lig_size {self.max_lig_size}. Not including {name} in preprocessed data.')
             return [], []
 
         complex_graph = HeteroData()
-        complex_graph['name'] = name
+        complex_graph['name'] = cache_name
         get_lig_graph_with_matching(lig, complex_graph, self.popsize, self.maxiter, self.matching, self.keep_original,
                                     self.num_conformers, remove_hs=self.remove_hs, tries=self.matching_tries)
 
-        moad_extract_receptor_structure(path=os.path.join(self.pdbbind_dir, name, f'{name}_{self.protein_file}.pdb'),
+        if os.path.exists(name):
+            protein_pdb_fp = name
+        else:
+            protein_pdb_fp = os.path.join(self.pdbbind_dir, name, f'{name}_{self.protein_file}.pdb')
+        moad_extract_receptor_structure(path=protein_pdb_fp,
                                         complex_graph=complex_graph,
                                         neighbor_cutoff=self.receptor_radius,
                                         max_neighbors=self.c_alpha_max_neighbors,
@@ -611,7 +686,7 @@ def process_and_save_complexes(
                                         atom_max_neighbors=self.atom_max_neighbors)
 
     except Exception as e:
-        print(f'Skipping {name} because of the error:')
+        print(f'Skipping {cache_name} because of the error:')
         print(e)
         return [], []
 

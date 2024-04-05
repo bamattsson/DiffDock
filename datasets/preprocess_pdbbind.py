@@ -9,11 +9,13 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str)
-    parser.add_argument("--split_path", type=str)
+    parser.add_argument("--split_path", type=str, default="")
     parser.add_argument("--keep_original", type=bool, default=True)
     parser.add_argument("--require_ligand", type=bool, default=False)
     parser.add_argument("--transform", type=str, default=None)
     parser.add_argument("--num_workers", type=int, default=None)
+    parser.add_argument("--force_regenerate", action="store_true", default=False)
+    parser.add_argument("--csv_lines_to_process", type=int, default=None)
 
     args = parser.parse_args()
     
@@ -32,6 +34,8 @@ if __name__ == "__main__":
         require_ligand=args.require_ligand,
         transform=args.transform,
         num_workers=args.num_workers,
+        force_regenerate=args.force_regenerate,
+        csv_lines_to_process=args.csv_lines_to_process,
     )
 
     print("Starting generating PDBBind dataset with arguments:", pdb_args)
