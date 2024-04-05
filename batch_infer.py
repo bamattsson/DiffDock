@@ -1,5 +1,6 @@
 import copy
 import os
+from sys import last_traceback
 import torch
 import traceback
 
@@ -324,7 +325,7 @@ if __name__ == '__main__':
                 data_to_dump = {
                     "orig_complex_graph": orig_complex_graph,
                     "predicted_ligand_pos": ligand_pos,
-                    "confidence": confidence_out.numpy(),
+                    "confidence": confidence_out.cpu().numpy(),
                 }
                 if orig_confidence_complex_graph is not None:
                     data_to_dump["orig_conf_complex_graph"] = orig_confidence_complex_graph
@@ -342,8 +343,8 @@ if __name__ == '__main__':
                 names_list.append(orig_complex_graph.name[0])
                 success = 1
             except Exception as e:
-                print("Failed on", orig_complex_graph["name"], e)
-                print(traceback.format_exc())
+                print(f"Failed on {orig_complex_graph['name']}, success={success}, error={e}")
+                last_traceback = traceback.format_exc()
                 success -= 1
                 if bs > 1:
                     bs = bs // 2
@@ -351,6 +352,8 @@ if __name__ == '__main__':
         if success != 1:
             # TODO: shall we save something here?
             failures += 1
+            print(f"Failed on {orig_complex_graph['name']}, no more retries. The last tracebak below.")
+            print(last_traceback)
 
     print(failures, "failures due to exceptions")
     print(skipped, ' skipped because complex was not in confidence dataset')

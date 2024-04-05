@@ -361,7 +361,7 @@ class AAModel(torch.nn.Module):
                atom_node_attr, data['atom', 'atom'].edge_index, atom_edge_attr, data['atom', 'atom'].edge_sh, data['atom', 'atom'].edge_weight, \
                data['atom', 'receptor'].edge_index, ar_edge_attr, data['atom', 'receptor'].edge_sh, data['atom', 'receptor'].edge_weight
 
-    def forward(self, data):
+    def forward(self, data, get_last_layer_embedding=False):
         if self.crop_beyond is not None:
             # TODO missing filtering atoms
             raise NotImplementedError
@@ -442,6 +442,14 @@ class AAModel(torch.nn.Module):
                 scalar_lig_attr = scalar_lig_attr[:, self.atom_num_confidence_outputs:]
             else:
                 atom_confidence = torch.zeros((len(lig_node_attr),), device=lig_node_attr.device)
+
+            if get_last_layer_embedding:
+                assert self.parallel == 1
+                assert not self.atom_confidence
+                last_layer_embedding = self.confidence_predictor[:-1](
+                    scatter_mean(scalar_lig_attr, data['ligand'].batch, dim=0)
+                )
+                return last_layer_embedding
 
             confidence = self.confidence_predictor(scatter_mean(scalar_lig_attr, data['ligand'].batch, dim=0)).squeeze(dim=-1)
 
