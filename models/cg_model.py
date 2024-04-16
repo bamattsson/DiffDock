@@ -23,7 +23,8 @@ class CGModel(torch.nn.Module):
                  scale_by_sigma=True, norm_by_sigma=True, use_second_order_repr=False, batch_norm=True,
                  dynamic_max_cross=False, dropout=0.0, smooth_edges=False, odd_parity=False,
                  separate_noise_schedule=False, lm_embedding_type=None, confidence_mode=False,
-                 confidence_dropout=0, confidence_no_batchnorm=False,
+                 confidence_dropout=0,
+                 confidence_no_batchnorm=False, confidence_normalization_layer = None,
                  asyncronous_noise_schedule=False, affinity_prediction=False, parallel=1,
                  parallel_aggregators="mean max min std", num_confidence_outputs=1, atom_num_confidence_outputs=1, fixed_center_conv=False,
                  no_aminoacid_identities=False, include_miscellaneous_atoms=False,
@@ -181,14 +182,27 @@ class CGModel(torch.nn.Module):
         if self.confidence_mode:
             input_size = ns + (nv if reduce_pseudoscalars else ns) if num_conv_layers + num_prot_emb_layers >= 3 else ns
 
+            def get_confidence_normalization_layer():
+                if confidence_normalization_layer in ["Identity"]:
+                    layer_class = getattr(nn, confidence_normalization_layer)
+                    return layer_class()
+                elif confidence_normalization_layer is not None:
+                    # Will not work with all, would have to split up further
+                    layer_class = getattr(nn, confidence_normalization_layer)
+                    return layer_class(ns)
+                if confidence_no_batchnorm:
+                    return nn.Identity()
+                else:
+                    return nn.BatchNorm1d(ns)
+
             if self.atom_confidence:
                 self.atom_confidence_predictor = nn.Sequential(
                     nn.Linear(input_size, ns),
-                    nn.BatchNorm1d(ns) if not confidence_no_batchnorm else nn.Identity(),
+                    get_confidence_normalization_layer(),
                     nn.ReLU(),
                     nn.Dropout(confidence_dropout),
                     nn.Linear(ns, ns),
-                    nn.BatchNorm1d(ns) if not confidence_no_batchnorm else nn.Identity(),
+                    get_confidence_normalization_layer(),
                     nn.ReLU(),
                     nn.Dropout(confidence_dropout),
                     nn.Linear(ns, atom_num_confidence_outputs + ns)
@@ -197,11 +211,11 @@ class CGModel(torch.nn.Module):
 
             self.confidence_predictor = nn.Sequential(
                 nn.Linear(input_size, ns),
-                nn.BatchNorm1d(ns) if not confidence_no_batchnorm else nn.Identity(),
+                get_confidence_normalization_layer(),
                 nn.ReLU(),
                 nn.Dropout(confidence_dropout),
                 nn.Linear(ns, ns),
-                nn.BatchNorm1d(ns) if not confidence_no_batchnorm else nn.Identity(),
+                get_confidence_normalization_layer(),
                 nn.ReLU(),
                 nn.Dropout(confidence_dropout),
                 nn.Linear(ns, num_confidence_outputs + (1 if self.affinity_prediction else 0))

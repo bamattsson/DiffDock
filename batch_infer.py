@@ -1,6 +1,5 @@
 import copy
 import os
-from sys import last_traceback
 import torch
 import traceback
 
@@ -124,7 +123,8 @@ if __name__ == '__main__':
 
     # record parameters
     yaml_file_name = os.path.join(out_dir, 'model_parameters.yml')
-    save_yaml_file(yaml_file_name, args.__dict__)
+    if not os.path.exists(yaml_file_name):
+        save_yaml_file(yaml_file_name, args.__dict__)
 
     if args.restrict_cpu:
         threads = 16
@@ -236,12 +236,18 @@ if __name__ == '__main__':
     print('Size of test dataset: ', len(test_dataset))
 
     complex_path = os.path.join(out_dir, "complexes_out")
-    os.makedirs(complex_path)
+    os.makedirs(complex_path, exist_ok=True)
     if args.save_visualisation:
         visualization_dir = os.path.join(out_dir, "visualizations")
-        os.makedirs(visualization_dir)
+        os.makedirs(visualization_dir, exist_ok=True)
 
     for idx, orig_complex_graph in tqdm(enumerate(test_loader)):
+        complex_save_fp = os.path.join(
+                complex_path,
+                f"{orig_complex_graph.name[0]}.pkl"
+            )
+        if os.path.exists(complex_save_fp):
+            continue
         if args.limit_complexes > 0 and (idx >= args.limit_complexes):
             print("Breaking as we are done analysing complexes")
             break
@@ -287,48 +293,49 @@ if __name__ == '__main__':
                     if confidence_model is not None and not (
                             confidence_args.use_original_model_cache or confidence_args.transfer_weights):
                         confidence_complex_id = confidence_complex_to_id_dict[orig_complex_graph.name[0]]
-                        confidence_complex_id
                         orig_confidence_complex_graph = confidence_test_dataset.get(confidence_complex_id)
                         confidence_data_list = [copy.deepcopy(orig_confidence_complex_graph) for _ in
                                                range(N)]
                     else:
                         confidence_data_list = None
                         orig_confidence_complex_graph = None
-
-                    data_list, confidence = sampling(data_list=data_list, model=model,
-                                                     inference_steps=args.actual_steps if args.actual_steps is not None else args.inference_steps,
-                                                     tr_schedule=tr_schedule, rot_schedule=rot_schedule,
-                                                     tor_schedule=tor_schedule,
-                                                     device=device, t_to_sigma=t_to_sigma, model_args=score_model_args,
-                                                     no_random=args.no_random,
-                                                     ode=args.ode, visualization_list=visualization_list,
-                                                     confidence_model=confidence_model,
-                                                     confidence_data_list=confidence_data_list,
-                                                     confidence_model_args=confidence_model_args,
-                                                     t_schedule=t_schedule,
-                                                     batch_size=bs,
-                                                     no_final_step_noise=args.no_final_step_noise, pivot=None,
-                                                     temp_sampling=[args.temp_sampling_tr, args.temp_sampling_rot, args.temp_sampling_tor],
-                                                     temp_psi=[args.temp_psi_tr, args.temp_psi_rot, args.temp_psi_tor],
-                                                     temp_sigma_data=[args.temp_sigma_data_tr, args.temp_sigma_data_rot, args.temp_sigma_data_tor])
+                    data_list, confidence = sampling(
+                        data_list=data_list, model=model,
+                        inference_steps=args.actual_steps if args.actual_steps is not None else args.inference_steps,
+                        tr_schedule=tr_schedule, rot_schedule=rot_schedule,
+                        tor_schedule=tor_schedule,
+                        device=device, t_to_sigma=t_to_sigma, model_args=score_model_args,
+                        no_random=args.no_random,
+                        ode=args.ode, visualization_list=visualization_list,
+                        confidence_model=confidence_model,
+                        confidence_data_list=confidence_data_list,
+                        confidence_model_args=confidence_model_args,
+                        t_schedule=t_schedule,
+                        batch_size=bs,
+                        no_final_step_noise=args.no_final_step_noise, pivot=None,
+                        temp_sampling=[args.temp_sampling_tr, args.temp_sampling_rot, args.temp_sampling_tor],
+                        temp_psi=[args.temp_psi_tr, args.temp_psi_rot, args.temp_psi_tor],
+                        temp_sigma_data=[args.temp_sigma_data_tr, args.temp_sigma_data_rot, args.temp_sigma_data_tor],
+                        mixed_precision_inference=args.mixed_precision_inference,
+                    )
                     confidence_out = confidence
 
                 run_times.append(time.time() - start_time)
                 if score_model_args.no_torsion:
                     orig_complex_graph['ligand'].orig_pos = (orig_complex_graph['ligand'].pos.cpu().numpy() + orig_complex_graph.original_center.cpu().numpy())
 
-                complex_save_fp = os.path.join(
-                    complex_path,
-                    f"{orig_complex_graph.name[0]}.pkl"
-                )
                 ligand_pos = np.array([complex_graph['ligand'].pos.cpu().numpy() for complex_graph in data_list])
                 data_to_dump = {
-                    "orig_complex_graph": orig_complex_graph,
+                    "orig_complex_graph_fp": orig_complex_graph.complex_graph_fp[0],
                     "predicted_ligand_pos": ligand_pos,
                     "confidence": confidence_out.cpu().numpy(),
                 }
+                if hasattr(orig_complex_graph, "mol_fp"):
+                    data_to_dump["orig_mol_fp"] = orig_complex_graph.mol_fp[0]
                 if orig_confidence_complex_graph is not None:
-                    data_to_dump["orig_conf_complex_graph"] = orig_confidence_complex_graph
+                    data_to_dump["orig_conf_complex_graph_fp"] = orig_confidence_complex_graph.complex_graph_fp
+                    if hasattr(orig_confidence_complex_graph, "mol_fp"):
+                        data_to_dump["orig_conf_mol_fp"] = orig_confidence_complex_graph.mol_fp
                 with open(complex_save_fp, "wb") as f:
                     pickle.dump(
                         data_to_dump,

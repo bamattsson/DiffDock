@@ -300,7 +300,8 @@ class PDBBind(Dataset):
             ) as f:
                 self.rdkit_ligand_fps = f.read().split("\n")
 
-        print_statistics(self.complex_graph_fps, self.full_cache_path)
+        # This doesn't need to be done every time
+        # print_statistics(self.complex_graph_fps, self.full_cache_path)
         list_names = []
         for complex_graph_fp in self.complex_graph_fps:
             with open(
@@ -320,18 +321,22 @@ class PDBBind(Dataset):
         return len(self.complex_graph_fps)
 
     def get(self, idx):
+        complex_graph_fp = self.get_full_path(self.complex_graph_fps[idx])
         with open(
-            self.get_full_path(self.complex_graph_fps[idx]),
+            complex_graph_fp,
             "rb"
             ) as f:
             complex_graph = pickle.load(f)[0]
+            complex_graph.complex_graph_fp = str(complex_graph_fp)
         if self.require_ligand:
+            mol_fp = self.get_full_path(self.rdkit_ligand_fps[idx])
             with open(
-                self.get_full_path(self.rdkit_ligand_fps[idx]),
+                mol_fp,
                 "rb"
                 ) as f:
                 mol = pickle.load(f)[0]
             complex_graph.mol = RemoveAllHs(mol)
+            complex_graph.mol_fp = str(mol_fp)
 
         for a in ['random_coords', 'coords', 'seq', 'sequence', 'mask', 'rmsd_matching', 'cluster', 'orig_seq', 'to_keep', 'chain_ids']:
             if hasattr(complex_graph, a):
@@ -340,6 +345,9 @@ class PDBBind(Dataset):
                 delattr(complex_graph['receptor'], a)
 
         return complex_graph
+
+    def get_heterograph_fp(self, idx):
+        return self.get_full_path(self.complex_graph_fps[idx])
 
     def preprocessing(self):
         print(f'Processing complexes from [{self.split_path}] and saving it to [{self.full_cache_path}]')

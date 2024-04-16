@@ -244,6 +244,7 @@ def get_model(args, device, t_to_sigma, no_parallel=False, confidence_mode=False
                             distance_embed_dim=args.distance_embed_dim,
                             cross_distance_embed_dim=args.cross_distance_embed_dim,
                             batch_norm=not args.no_batch_norm,
+                            confidence_normalization_layer=getattr(args, "confidence_normalization_layer", None),
                             dropout=args.dropout,
                             use_second_order_repr=args.use_second_order_repr,
                             cross_max_distance=args.cross_max_distance,

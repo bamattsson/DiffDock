@@ -69,7 +69,7 @@ def is_iterable(arr):
 def sampling(data_list, model, inference_steps, tr_schedule, rot_schedule, tor_schedule, device, t_to_sigma, model_args,
              no_random=False, ode=False, visualization_list=None, confidence_model=None, confidence_data_list=None, confidence_model_args=None,
              t_schedule=None, batch_size=32, no_final_step_noise=False, pivot=None, return_full_trajectory=False,
-             temp_sampling=1.0, temp_psi=0.0, temp_sigma_data=0.5, return_features=False):
+             temp_sampling=1.0, temp_psi=0.0, temp_sigma_data=0.5, return_features=False, mixed_precision_inference=False):
     N = len(data_list)
     trajectory = []
     if return_features:
@@ -112,7 +112,15 @@ def sampling(data_list, model, inference_steps, tr_schedule, rot_schedule, tor_s
                 set_time(mod_complex_graph_batch, t_schedule[t_idx] if t_schedule is not None else None, t_tr, t_rot, t_tor, b,
                          'all_atoms' in model_args and model_args.all_atoms, device)
 
-                tr_score, rot_score, tor_score = model(mod_complex_graph_batch)[:3]
+                with torch.autocast(
+                    device_type=device.type,
+                    dtype=torch.bfloat16,
+                    enabled=mixed_precision_inference,
+                    ):
+                    tr_score, rot_score, tor_score = model(mod_complex_graph_batch)[:3]
+                    tr_score = tr_score.float()
+                    rot_score = rot_score.float()
+                    tor_score = tor_score.float()
 
                 tr_g = tr_sigma * torch.sqrt(torch.tensor(2 * np.log(model_args.tr_sigma_max / model_args.tr_sigma_min)))
                 rot_g = rot_sigma * torch.sqrt(torch.tensor(2 * np.log(model_args.rot_sigma_max / model_args.rot_sigma_min)))
@@ -207,17 +215,29 @@ def sampling(data_list, model, inference_steps, tr_schedule, rot_schedule, tor_s
 
                     confidence_complex_graph_batch = confidence_complex_graph_batch.to(device)
                     set_time(confidence_complex_graph_batch, 0, 0, 0, 0, b, confidence_model_args.all_atoms, device)
-                    out = confidence_model(confidence_complex_graph_batch)
+                    with torch.autocast(
+                        device_type=device.type,
+                        dtype=torch.bfloat16,
+                        enabled=mixed_precision_inference,
+                        ):
+                        out = confidence_model(confidence_complex_graph_batch)
                 else:
-                    out = confidence_model(complex_graph_batch)
+                    with torch.autocast(
+                        device_type=device.type,
+                        dtype=torch.bfloat16,
+                        enabled=mixed_precision_inference,
+                        ):
+                        out = confidence_model(complex_graph_batch)
 
                 if type(out) is tuple:
                     out = out[0]
+                out = out.float()
                 confidence.append(out)
 
     if confidence_model is not None:
         confidence = torch.cat(confidence, dim=0)
-        confidence = torch.nan_to_num(confidence, nan=-1000)
+        # Next row is a bit dangerous, better to keep it to nan to be explicit
+        # confidence = torch.nan_to_num(confidence, nan=-1000)
 
     if return_full_trajectory:
         return data_list, confidence, trajectory
@@ -259,7 +279,8 @@ def compute_confidence(
             confidence.append(out)
 
     confidence = torch.cat(confidence, dim=0)
-    confidence = torch.nan_to_num(confidence, nan=-1000)
+    # Next row is a bit dangerous, better to keep it to nan to be explicit
+    # confidence = torch.nan_to_num(confidence, nan=-1000)
 
     return confidence
 
