@@ -118,7 +118,7 @@ class FasterTensorProduct(torch.nn.Module):
 
 
 class TensorProductConvLayer(torch.nn.Module):
-    def __init__(self, in_irreps, sh_irreps, out_irreps, n_edge_features, residual=True, batch_norm=True, dropout=0.0,
+    def __init__(self, in_irreps, sh_irreps, out_irreps, n_edge_features, residual=True, batch_norm=True, batch_norm_kwargs=None, dropout=0.0,
                  hidden_features=None, faster=False, edge_groups=1, tp_weights_layers=2, activation='relu', depthwise=False):
         super(TensorProductConvLayer, self).__init__()
         self.in_irreps = in_irreps
@@ -190,7 +190,9 @@ class TensorProductConvLayer(torch.nn.Module):
             self.fc = [FCBlock(n_edge_features, hidden_features, self.tp.weight_numel, tp_weights_layers, dropout, activation) for _ in range(edge_groups)]
             self.fc = nn.ModuleList(self.fc)
 
-        self.batch_norm = BatchNorm(out_irreps) if batch_norm else None
+        if batch_norm_kwargs is None:
+            batch_norm_kwargs = {}
+        self.batch_norm = BatchNorm(out_irreps, **batch_norm_kwargs) if batch_norm else None
 
     def forward(self, node_attr, edge_index, edge_attr, edge_sh, out_nodes=None, reduce='mean', edge_weight=1.0):
 

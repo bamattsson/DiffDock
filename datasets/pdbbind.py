@@ -265,7 +265,6 @@ class PDBBind(Dataset):
         self.num_conformers = num_conformers
 
         self.atom_radius, self.atom_max_neighbors = atom_radius, atom_max_neighbors
-        self.csv_lines_to_process = csv_lines_to_process
         if force_regenerate or not self.check_all_complexes():
             os.makedirs(self.full_cache_path, exist_ok=True)
             os.makedirs(
@@ -277,7 +276,7 @@ class PDBBind(Dataset):
                 exist_ok=True
             )
             if self.dataset == "pla_data":
-                self.preprocess_pla_data()
+                self.preprocess_pla_data(csv_lines_to_process)
             elif self.dataset == "PDBBind":
                 if protein_path_list is None or ligand_descriptions is None:
                     self.preprocessing()
@@ -302,18 +301,19 @@ class PDBBind(Dataset):
 
         # This doesn't need to be done every time
         # print_statistics(self.complex_graph_fps, self.full_cache_path)
-        list_names = []
-        for complex_graph_fp in self.complex_graph_fps:
-            with open(
-                self.get_full_path(complex_graph_fp),
-                "rb"
-                ) as f:
-                list_names.append(pickle.load(f)[0]["name"])
         list_name_txt_fp = os.path.join(
             self.full_cache_path,
             f'pdbbind_{os.path.splitext(os.path.basename(self.split_path))[0][:3]}_names.txt'
         )
-        if not os.path.exists(list_name_txt_fp):
+        if not os.path.exists(list_name_txt_fp) or force_regenerate:
+            list_names = []
+            for complex_graph_fp in self.complex_graph_fps:
+                with open(
+                    self.get_full_path(complex_graph_fp),
+                    "rb"
+                    ) as f:
+                    list_names.append(pickle.load(f)[0]["name"])
+
             with open(list_name_txt_fp, 'w') as f:
                 f.write('\n'.join(list_names))
 
@@ -430,11 +430,12 @@ class PDBBind(Dataset):
 
     def preprocess_pla_data(
             self,
+            csv_lines_to_process
     ):
         complexes_df = pd.read_csv(self.pdbbind_dir, index_col=0, low_memory=False)
 
-        if self.csv_lines_to_process is not None:
-            complexes_df = complexes_df.iloc[:self.csv_lines_to_process].copy()
+        if csv_lines_to_process is not None:
+            complexes_df = complexes_df.iloc[:csv_lines_to_process].copy()
 
         complex_names_all = complexes_df["pdb_id"].to_list()
 

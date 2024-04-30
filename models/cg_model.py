@@ -21,6 +21,7 @@ class CGModel(torch.nn.Module):
                  ns=16, nv=4, num_conv_layers=2, lig_max_radius=5, rec_max_radius=30, cross_max_distance=250,
                  center_max_distance=30, distance_embed_dim=32, cross_distance_embed_dim=32, no_torsion=False,
                  scale_by_sigma=True, norm_by_sigma=True, use_second_order_repr=False, batch_norm=True,
+                 batch_norm_kwargs=None,
                  dynamic_max_cross=False, dropout=0.0, smooth_edges=False, odd_parity=False,
                  separate_noise_schedule=False, lm_embedding_type=None, confidence_mode=False,
                  confidence_dropout=0,
@@ -33,6 +34,7 @@ class CGModel(torch.nn.Module):
         super(CGModel, self).__init__()
         assert parallel == 1, "not implemented"
         assert (not no_aminoacid_identities) or (lm_embedding_type is None), "no language model emb without identities"
+        assert batch_norm_kwargs is None, "not implemented for CGModel"
         self.t_to_sigma = t_to_sigma
         self.in_lig_edge_features = in_lig_edge_features
         sigma_embed_dim *= (3 if separate_noise_schedule else 1)

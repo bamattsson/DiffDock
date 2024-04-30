@@ -28,13 +28,16 @@ from utils.sampling import randomize_position, sampling
 from utils.utils import get_model, ExponentialMovingAverage, save_yaml_file
 from utils.visualise import PDBFile
 from tqdm import tqdm
+from dltools.datasets.heterograph_dataset import HeterographDataset
 
 RDLogger.DisableLog('rdApp.*')
 import yaml
 import pickle
 
 
-def get_dataset(args, model_args):
+def get_dataset(args, model_args, heterograph_dataset_args):
+    if heterograph_dataset_args is not None:
+        return HeterographDataset(**heterograph_dataset_args)
     if args.dataset == 'moad':
         raise NotImplementedError
     
@@ -153,7 +156,11 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device found: {device}")
 
-    test_dataset = get_dataset(args, score_model_args)
+    test_dataset = get_dataset(
+        args,
+        score_model_args,
+        getattr(args, "score_model_heterograph_dataset_args"),
+    )
     test_loader = DataLoader(
         dataset=test_dataset,
         batch_size=1,
@@ -164,12 +171,20 @@ if __name__ == '__main__':
         if not (confidence_args.use_original_model_cache or confidence_args.transfer_weights):
             # if the confidence model uses the same type of data as the original model then we do not need this dataset and can just use the complexes
             print('HAPPENING | confidence model uses different type of graphs than the score model. Loading (or creating if not existing) the data for the confidence model now.')
-            confidence_test_dataset = get_dataset(args, confidence_args)
+            confidence_test_dataset = get_dataset(
+                args,
+                confidence_args,
+                getattr(args, "confidence_model_heterograph_dataset_args"),
+            )
             num_test_samples = confidence_test_dataset.len()
             confidence_complex_to_id_dict = {}
             for id_ in range(confidence_test_dataset.len()):
-                complex = confidence_test_dataset.get(id_)
-                confidence_complex_to_id_dict[complex.name] = id_
+                if isinstance(confidence_test_dataset, PDBBind):
+                    complex = confidence_test_dataset.get(id_)
+                    complex_name = complex.name
+                elif isinstance(confidence_test_dataset, HeterographDataset):
+                    complex_name = confidence_test_dataset.get_complex_name(id_)
+                confidence_complex_to_id_dict[complex_name] = id_
 
     t_to_sigma = partial(t_to_sigma_compl, args=score_model_args)
 
@@ -326,16 +341,26 @@ if __name__ == '__main__':
 
                 ligand_pos = np.array([complex_graph['ligand'].pos.cpu().numpy() for complex_graph in data_list])
                 data_to_dump = {
-                    "orig_complex_graph_fp": orig_complex_graph.complex_graph_fp[0],
                     "predicted_ligand_pos": ligand_pos,
                     "confidence": confidence_out.cpu().numpy(),
                 }
+                if hasattr(orig_complex_graph, "orig_complex_graph_fp"):
+                    data_to_dump["orig_complex_graph_fp"] = orig_complex_graph.complex_graph_fp[0]
                 if hasattr(orig_complex_graph, "mol_fp"):
                     data_to_dump["orig_mol_fp"] = orig_complex_graph.mol_fp[0]
+                if hasattr(orig_complex_graph, "ligand_graph_fp"):
+                    data_to_dump["docking_model_ligand_graph_fp"] = orig_complex_graph.ligand_graph_fp[0]
+                if hasattr(orig_complex_graph, "protein_graph_fp"):
+                    data_to_dump["docking_model_protein_graph_fp"] = orig_complex_graph.protein_graph_fp[0]
                 if orig_confidence_complex_graph is not None:
-                    data_to_dump["orig_conf_complex_graph_fp"] = orig_confidence_complex_graph.complex_graph_fp
+                    if hasattr(orig_confidence_complex_graph, "orig_conf_complex_graph_fp"):
+                        data_to_dump["orig_conf_complex_graph_fp"] = orig_confidence_complex_graph.complex_graph_fp
                     if hasattr(orig_confidence_complex_graph, "mol_fp"):
                         data_to_dump["orig_conf_mol_fp"] = orig_confidence_complex_graph.mol_fp
+                    if hasattr(orig_confidence_complex_graph, "ligand_graph_fp"):
+                        data_to_dump["conf_model_ligand_graph_fp"] = orig_confidence_complex_graph.ligand_graph_fp
+                    if hasattr(orig_confidence_complex_graph, "protein_graph_fp"):
+                        data_to_dump["conf_model_protein_graph_fp"] = orig_confidence_complex_graph.protein_graph_fp
                 with open(complex_save_fp, "wb") as f:
                     pickle.dump(
                         data_to_dump,

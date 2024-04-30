@@ -24,6 +24,7 @@ class AAModel(torch.nn.Module):
                  ns=16, nv=4, num_conv_layers=2, lig_max_radius=5, rec_max_radius=30, cross_max_distance=250,
                  center_max_distance=30, distance_embed_dim=32, cross_distance_embed_dim=32, no_torsion=False,
                  scale_by_sigma=True, norm_by_sigma=True, use_second_order_repr=False, batch_norm=True,
+                 batch_norm_kwargs=None,
                  dynamic_max_cross=False, dropout=0.0, smooth_edges=False, odd_parity=False,
                  separate_noise_schedule=False, lm_embedding_type=False, confidence_mode=False,
                  confidence_dropout=0,
@@ -123,6 +124,7 @@ class AAModel(torch.nn.Module):
                 hidden_features=3 * ns,
                 residual=True,
                 batch_norm=batch_norm,
+                batch_norm_kwargs=batch_norm_kwargs,
                 dropout=dropout,
                 faster=sh_lmax == 1 and not use_second_order_repr,
                 tp_weights_layers=tp_weights_layers,
@@ -145,6 +147,7 @@ class AAModel(torch.nn.Module):
                     hidden_features=3 * ns,
                     residual=True,
                     batch_norm=batch_norm,
+                    batch_norm_kwargs=batch_norm_kwargs,
                     dropout=dropout,
                     faster=sh_lmax == 1 and not use_second_order_repr,
                     tp_weights_layers=tp_weights_layers,
@@ -166,6 +169,7 @@ class AAModel(torch.nn.Module):
                 hidden_features=3 * ns,
                 residual=True,
                 batch_norm=batch_norm,
+                batch_norm_kwargs=batch_norm_kwargs,
                 dropout=dropout,
                 faster=sh_lmax == 1 and not use_second_order_repr,
                 tp_weights_layers=tp_weights_layers,
@@ -255,7 +259,8 @@ class AAModel(torch.nn.Module):
                 n_edge_features=2 * ns,
                 residual=False,
                 dropout=dropout,
-                batch_norm=batch_norm
+                batch_norm=batch_norm,
+                batch_norm_kwargs=batch_norm_kwargs,
             )
 
             self.tr_final_layer = nn.Sequential(nn.Linear(1 + sigma_embed_dim, ns),nn.Dropout(dropout), nn.ReLU(), nn.Linear(ns, 1))
@@ -277,7 +282,8 @@ class AAModel(torch.nn.Module):
                     n_edge_features=3 * ns,
                     residual=False,
                     dropout=dropout,
-                    batch_norm=batch_norm
+                    batch_norm=batch_norm,
+                    batch_norm_kwargs=batch_norm_kwargs,
                 )
                 self.tor_final_layer = nn.Sequential(
                     nn.Linear(2 * ns if not self.odd_parity else ns, ns, bias=False),
