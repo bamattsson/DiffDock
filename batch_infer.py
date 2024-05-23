@@ -248,6 +248,7 @@ if __name__ == '__main__':
     failures, skipped, names_list = 0, 0, []
     run_times = []
     N = args.samples_per_complex
+    min_non_nan_predictions = min(4, N // 2)
     print('Size of test dataset: ', len(test_dataset))
 
     complex_path = os.path.join(out_dir, "complexes_out")
@@ -333,7 +334,10 @@ if __name__ == '__main__':
                         temp_sigma_data=[args.temp_sigma_data_tr, args.temp_sigma_data_rot, args.temp_sigma_data_tor],
                         mixed_precision_inference=args.mixed_precision_inference,
                     )
-                    confidence_out = confidence
+                    confidence = confidence.cpu().numpy()
+                    num_non_nan_preds = np.isfinite(confidence[:, 0]).sum()
+                    if num_non_nan_preds < min_non_nan_predictions:
+                        raise RuntimeError(f"Min number of non-nan predictions not met. Only found {num_non_nan_preds} of required {min_non_nan_predictions}.")
 
                 run_times.append(time.time() - start_time)
                 if score_model_args.no_torsion:
@@ -342,7 +346,7 @@ if __name__ == '__main__':
                 ligand_pos = np.array([complex_graph['ligand'].pos.cpu().numpy() for complex_graph in data_list])
                 data_to_dump = {
                     "predicted_ligand_pos": ligand_pos,
-                    "confidence": confidence_out.cpu().numpy(),
+                    "confidence": confidence,
                 }
                 if hasattr(orig_complex_graph, "orig_complex_graph_fp"):
                     data_to_dump["orig_complex_graph_fp"] = orig_complex_graph.complex_graph_fp[0]
