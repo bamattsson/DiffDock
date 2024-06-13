@@ -79,6 +79,25 @@ To set up an appropriate environment, navigate to the root of the repository and
 
 See [conda documentation](https://conda.io/projects/conda/en/latest/commands/env/create.html) for more information.
 
+### Using a Docker container
+
+A Dockerfile is provided for building a container:
+
+    docker build -f Dockerfile -t diffdock
+
+Alternatively, you can use a pre-built container to run the code.
+First, download the container from Docker Hub:
+
+    docker pull rbgcsail/diffdock
+
+Then, run the container:
+
+    docker run -it --entrypoint /bin/bash rbgcsail/diffdock
+    # Inside the container
+    micromamba activate diffdock
+
+You can now run the code as described below.
+
 ### Docking Prediction  <a name="inference"></a>
 
 We support multiple input formats depending on whether you only want to make predictions for a single complex or for many at once.\
@@ -87,11 +106,11 @@ The protein inputs need to be `.pdb` files or sequences that will be folded with
 For a single complex: specify the protein with `--protein_path protein.pdb` or `--protein_sequence GIQSYCTPPYSVLQDPPQPVV` and the ligand with `--ligand ligand.sdf` or `--ligand "COc(cc1)ccc1C#N"`
 
 For many complexes: create a csv file with paths to proteins and ligand files or SMILES. It contains as columns `complex_name` (name used to save predictions, can be left empty), `protein_path` (path to `.pdb` file, if empty uses sequence), `ligand_description` (SMILE or file path)  and `protein_sequence` (to fold with ESMFold in case the protein_path is empty).
-An example .csv is at `data/protein_ligand_example_csv.csv` and you would use it with `--protein_ligand_csv protein_ligand_example_csv.csv`.
+An example .csv is at `data/protein_ligand_example.csv` and you would use it with `--protein_ligand_csv protein_ligand_example.csv`.
 
 And you are ready to run inference:
 
-    python -m inference --config default_inference_args.yaml  --protein_ligand_csv data/protein_ligand_example_csv.csv --out_dir results/user_predictions_small 
+    python -m inference --config default_inference_args.yaml  --protein_ligand_csv data/protein_ligand_example.csv --out_dir results/user_predictions_small 
 
 When providing the `.pdb` files you can run DiffDock also on CPU, however, if possible, we recommend using a GPU as the model runs significantly faster. Note that the first time you run DiffDock on a device the program will precompute and store in cache look-up tables for SO(2) and SO(3) distributions (typically takes a couple of minutes), this won't be repeated in following runs.  
 
